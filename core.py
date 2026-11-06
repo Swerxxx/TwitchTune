@@ -197,7 +197,7 @@ class QueueStore:
         playing=[r for r in active if r['status']=='Играет']
         waiting=[r for r in active if r['status']=='Ждёт оценки']
         upcoming=[r for r in active if r['status'] not in ('Играет','Ждёт оценки')]
-        paid=sorted((r for r in upcoming if r['donation_priority']),key=lambda r:(r['donation_time'],r['created_at'],r['id']))
+        paid=sorted((r for r in upcoming if r['donation_priority']),key=lambda r:(r['donation_time'],r['created_at'],r['position']))
         vip=[r for r in upcoming if r['vip_priority'] and not r['donation_priority']]
         regular=[r for r in upcoming if not r['vip_priority'] and not r['donation_priority']]
         for position,row in zip(sorted(r['position'] for r in active),playing+paid+vip+regular+waiting):

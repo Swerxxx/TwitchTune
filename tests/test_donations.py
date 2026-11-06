@@ -28,6 +28,12 @@ class DonationCoreTests(unittest.TestCase):
         paid=event(ident,provider,**extra)
         return self.store.add(paid['url'],paid['viewer'],redemption=paid['event_key'],donation=paid)
 
+    def test_equal_timestamps_keep_submission_order_instead_of_random_uuid_order(self):
+        with patch('core.time.time',return_value=12345), patch('core.uuid.uuid4',side_effect=[SimpleNamespace(hex='f'*32),SimpleNamespace(hex='a'*32)]):
+            first=self.add_paid('first')
+            second=self.add_paid('second')
+        self.assertEqual([row['id'] for row in self.store.rows('active')],[first,second])
+
     def test_donations_above_vip_fifo_without_interrupting_current(self):
         playing=self.store.add('https://youtu.be/playing','playing')
         self.store.update(playing,status='Играет')

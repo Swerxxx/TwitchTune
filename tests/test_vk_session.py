@@ -74,6 +74,7 @@ class VKSessionTests(unittest.TestCase):
                 connection.execute('CREATE TABLE moz_cookies(host,name,value,path,expiry,isSecure,originAttributes)')
                 connection.executemany('INSERT INTO moz_cookies VALUES(?,?,?,?,?,?,?)',[
                     ('.vk.ru','remixsid','DUMMY','/',9999999999,1,''),('.yandex.ru','Session_id','OTHER','/',9999999999,1,''),('.vk.ru','container','NO','/',9999999999,1,'userContextId=1')])
+            connection.close()
             before=path.read_bytes()
             self.assertEqual([x.name for x in firefox_vk_cookies(folder)],['remixsid'])
             self.assertEqual(path.read_bytes(),before)

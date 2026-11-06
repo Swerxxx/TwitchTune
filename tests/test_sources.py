@@ -82,7 +82,7 @@ class SourceTests(unittest.TestCase):
                 row = store.get(ident)
                 self.assertEqual(row['status'], 'Готово')
                 self.assertEqual(row['title'], 'Исполнитель — Проверочный трек')
-                self.assertEqual(row['path'], str(path))
+                self.assertEqual(row['path'], str(path.resolve()))
                 self.assertEqual(row['replacement'], '')
                 self.assertEqual(row['viewer'], 'viewer')
                 self.assertEqual(direct.call_args.args[1], URL)

@@ -16,7 +16,7 @@ def album_metadata():
 
 class AlbumStoreTests(unittest.TestCase):
     def setUp(self):
-        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name).resolve()
         self.path=self.root/'queue.sqlite3';self.store=QueueStore(self.path)
     def tearDown(self):self.store.db.close();self.temp.cleanup()
     def ready(self, ids):
@@ -94,7 +94,7 @@ class AlbumStoreTests(unittest.TestCase):
         meta=album_metadata();meta['title']='../../bad:album?*';meta['artist']='a/b'
         album,ids=create_album(self.store,self.root/'Альбомы',meta)
         folder=track_folder(self.root/'tracks',self.store.get(ids[0]))
-        self.assertEqual(folder.parent,self.root/'Альбомы')
+        self.assertEqual(folder.parent,(self.root/'Альбомы').resolve())
         self.assertTrue((folder/'Об альбоме.txt').is_file())
         with self.assertRaises(ValueError):track_folder(self.root/'tracks',dict(album_folder=str(self.root)))
         self.assertNotIn('/',safe_name('../A/B'))
@@ -152,7 +152,7 @@ class AlbumDownloadTests(unittest.TestCase):
         from media import Downloader
         from threading import Event
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder);store=QueueStore(root/'q.db')
+            root=Path(folder).resolve();store=QueueStore(root/'q.db')
             try:
                 metadata=album_metadata()
                 for i,row in enumerate(metadata['tracks']):row['url']=f'https://youtu.be/track{i}'
@@ -171,8 +171,8 @@ class AlbumDownloadTests(unittest.TestCase):
                 with patch('media.YoutubeDL',side_effect=fake_ydl),patch('media.download_cover',return_value='') as cover:
                     down.download(store.get(ids[0]))
                     row=store.get(ids[0])
-                    self.assertEqual(Path(row['path']).parent,Path(row['album_folder']))
-                    self.assertEqual(cover.call_args.args[1],Path(row['album_folder']))
+                    self.assertEqual(Path(row['path']).parent,Path(row['album_folder']).resolve())
+                    self.assertEqual(cover.call_args.args[1],Path(row['album_folder']).resolve())
                     self.assertTrue(Path(row['path']).is_file())
                     self.assertFalse((root/'tracks'/(ids[0]+'.mp3')).exists())
             finally:store.db.close()
