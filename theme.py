@@ -1,0 +1,138 @@
+"""Acid Deck: black metal, inset LCD screens, and yellow-green hardware accents."""
+STYLE = '''
+QWidget { color: #d8ddcb; font: 10pt "Segoe UI"; }
+QMainWindow, QDialog { background: #090b09; }
+QDialog QWidget { background-color: #10140c; }
+QWidget#shell, QWidget#page { background: transparent; }
+QFrame#metal, QGroupBox { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #252a20,stop:.06 #151912,stop:1 #0d100c); border: 1px solid #454d36; border-radius: 13px; }
+QFrame#dock { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #3b4330,stop:.025 #171c12,stop:.11 #0b0e09,stop:1 #171c12); border: 1px solid #697c36; border-radius: 17px; }
+QGroupBox { margin-top: 12px; padding: 17px 10px 10px; }
+QGroupBox::title { subcontrol-origin: margin; left: 13px; padding: 0 5px; color: #c6f52b; font: 9pt "Consolas"; }
+QLabel { background: transparent; border: none; }
+QLabel#brand { font: bold 25pt "Bahnschrift"; color: #e4e9d5; letter-spacing: -1px; }
+QLabel#acid { color: #c6f52b; font: bold 10pt "Consolas"; }
+QLabel#micro { color: #7e896a; font: 8pt "Consolas"; }
+QLabel#section { color: #c6f52b; font: bold 10pt "Consolas"; }
+QLabel#counter { color: #c6f52b; font: bold 25pt "Consolas"; }
+QLabel#nowTitle { color: #e4e9d5; font: bold 10pt "Segoe UI"; }
+QLabel#muted { color: #879477; font: 9pt "Segoe UI"; }
+QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #414735,stop:.10 #2c3224,stop:.46 #1b2114,stop:.51 #0c1108,stop:1 #202718); border: 1px solid #56623d; border-radius: 7px; padding: 8px 12px; color: #c8d1b3; }
+QPushButton:hover { border-color: #c6f52b; color: #e1ff8c; }
+QPushButton:pressed { background: #111a06; }
+QPushButton:disabled { color: #626b52; border-color: #303727; }
+QPushButton#primary { color: #172300; font-weight: bold; border: 1px solid #defb6e; background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #d7fa62,stop:.48 #b9ea2a,stop:.51 #9cc718,stop:1 #b7de37); }
+QPushButton#primary:disabled { color: #71804e; background: #232d16; border-color: #3f5125; }
+QPushButton#nav { text-align: left; padding: 13px 10px; font: 9pt "Consolas"; border-color: #333e23; background: #13190e; }
+QPushButton#nav:checked { color: #d9ff7d; border: 1px solid #a2ce25; background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #354719,stop:1 #151e0b); }
+QPushButton#score { min-width: 20px; padding: 5px; border-radius: 4px; font: 9pt "Consolas"; }
+QPushButton#score:checked { color: #112000; background: #c6f52b; border-color: #d9ff69; }
+QLineEdit, QPlainTextEdit, QListWidget, QComboBox, QSpinBox { background: #080c05; color: #d5ddc4; border: 1px solid #3e4c2a; border-radius: 7px; padding: 8px; selection-background-color: #354b17; selection-color: #e7ffb3; }
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: #abd628; }
+QLineEdit { min-height: 19px; }
+QComboBox::drop-down { border: none; width: 22px; }
+QSpinBox { font: bold 15pt "Consolas"; color: #c6f52b; }
+QSpinBox#criterionScore { font: bold 10pt "Consolas"; padding: 2px 16px 2px 4px; }
+QSpinBox#criterionScore:disabled { color: #68715a; border-color: #303727; }
+QListWidget#queue { border: none; background: transparent; padding: 0; }
+QListWidget::item { padding: 10px 8px; border-bottom: 1px solid #222c19; }
+QListWidget::item:selected { background: #273617; color: #e0ff99; }
+QTabWidget::pane { border: none; background: transparent; }
+QTabBar::tab { background: #171e10; border: 1px solid #46552c; padding: 6px; }
+QSlider::groove:horizontal { height: 4px; background: #303a22; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: #c6f52b; border-radius: 2px; }
+QSlider::handle:horizontal { width: 9px; margin: -4px 0; background: #dcff74; border: 1px solid #92aa3f; border-radius: 5px; }
+QScrollBar:vertical { background: #0d1208; width: 8px; margin: 0; }
+QScrollBar::handle:vertical { background: #647b34; min-height: 25px; border-radius: 4px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QToolTip { background: #141d0a; color: #e3ffa8; border: 1px solid #718d31; }
+QPushButton#lyricsButton { padding: 2px 8px; font: 8pt "Segoe UI"; border-radius: 5px; }
+QTextEdit#lyricsBody { background: transparent; color: #d8ddcb; border: none; padding: 10px; selection-background-color: #354b17; }
+QLabel#lyricsTitle { font: bold 25pt "Segoe UI"; color: #e4e9d5; }
+QFrame#lyricsPaper { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #151912,stop:1 #090b09); border: 1px solid #454d36; border-radius: 16px; }
+'''
+
+# Every old green shade has a matching tinted shade. This also covers custom
+# QPainter surfaces, rather than recoloring only Qt's standard controls.
+import colorsys
+import re
+
+THEMES = {
+    'violet': dict(name='Фиолетовый', tag='PHANTOM VIOLET', accent='#b58aea',
+                   description='Дымчатый фиолетовый и холодная подсветка LCD.', hue=.755, saturation=.68,
+                   primary=('#d4b9f6', '#b699e4', '#9674ce', '#b99be9')),
+    'green': dict(name='Зелёный', tag='ACID GREEN', accent='#c6f52b',
+                  description='Кислотный зелёный — исходная тема ACID DECK.', hue=.21, saturation=1,
+                  primary=('#d7fa62', '#b9ea2a', '#9cc718', '#b7de37')),
+    'black': dict(name='Чёрный', tag='CARBON BLACK', accent='#c0c6ce',
+                  description='Чёрный графит, серебристые кнопки и монохромный LCD.', hue=0, saturation=0,
+                  primary=('#e0e3e8', '#bac0c9', '#939ca9', '#bdc4ce')),
+    'red': dict(name='Красный', tag='CRIMSON RED', accent='#ee7888',
+                description='Глубокий карминовый с мягкой красной подсветкой.', hue=.975, saturation=.72,
+                primary=('#f5a6b0', '#ed8190', '#cc6074', '#e98695')),
+}
+
+
+def normalize_theme(key):
+    return key if isinstance(key, str) and key in THEMES else 'green'
+
+
+def theme_color(value, key='green'):
+    key = normalize_theme(key)
+    if key == 'green':
+        return value
+    theme = THEMES[key]
+    if value.lower() == '#c6f52b':
+        return theme['accent']
+    gradient = ('#d7fa62', '#b9ea2a', '#9cc718', '#b7de37')
+    if value.lower() in gradient:
+        return theme['primary'][gradient.index(value.lower())]
+    rgb = tuple(int(value[i:i+2], 16)/255 for i in (1, 3, 5))
+    _, lightness, saturation = colorsys.rgb_to_hls(*rgb)
+    rgb = colorsys.hls_to_rgb(theme['hue'], lightness, min(.85, saturation*theme['saturation']))
+    return '#' + ''.join(f'{round(channel*255):02x}' for channel in rgb)
+
+
+def stylesheet(key='green'):
+    return re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: theme_color(match.group(), key), STYLE)
+
+STYLE += '''
+QLabel#brandMark { border: 1px solid #b5df29; border-radius: 15px; background: #19220b; color: #c6f52b; font: bold 20pt "Bahnschrift"; }
+QLabel#coverBadge { border: 1px solid #78943a; border-radius: 12px; background: #131c08; color: #c6f52b; font: bold 10pt "Consolas"; }
+QScrollArea#settingsScroll { border: none; background: transparent; }
+QScrollArea#settingsScroll > QWidget > QWidget { background: transparent; }
+'''
+
+
+STYLE += '''
+QDialog#rewardDialog QLabel { background: transparent; }
+QLabel#rewardHeading { font: bold 23pt "Segoe UI"; color: #e4e9d5; }
+QLabel#rewardBadge { border: 1px solid #56623d; border-radius: 10px; padding: 12px; color: #c6f52b; background: #131c08; font: bold 9pt "Consolas"; }
+QFrame#rewardCard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #151912,stop:1 #0d100c); border: 1px solid #333e23; border-radius: 12px; }
+QFrame#rewardCard[selected="true"] { border-color: #78943a; background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #202718,stop:1 #10140c); }
+QFrame#rewardCard QLabel, QWidget#durationControl { background: transparent; }
+QLabel#rewardTitle { font: bold 11pt "Segoe UI"; color: #e4e9d5; }
+QSpinBox#durationDigits { background: #080c05; color: #c6f52b; padding: 7px 21px 7px 7px; border: 1px solid #3e4c2a; border-radius: 7px; font: bold 21pt "Consolas"; }
+QSpinBox#durationDigits:focus { border-color: #abd628; }
+QSpinBox#durationDigits:disabled { color: #626b52; border-color: #303727; }
+QCheckBox#rewardCheck::indicator { width: 22px; height: 22px; border: 1px solid #56623d; border-radius: 6px; background: #080c05; }
+QCheckBox#rewardCheck::indicator:checked { background: #c6f52b; border: 4px solid #354b17; }
+QCheckBox#rewardCheck::indicator:hover { border-color: #c6f52b; }
+QScrollArea#rewardScroll { border: none; background: transparent; }
+QWidget#rewardList { background: transparent; }
+QScrollArea#rewardScroll > QWidget { background: transparent; }
+'''
+
+
+from pathlib import Path
+STYLE += '''
+QSpinBox#durationDigits::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; height: 25px; border: none; }
+QSpinBox#durationDigits::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; height: 25px; border: none; }
+QSpinBox#durationDigits::up-button:hover, QSpinBox#durationDigits::down-button:hover { background: #273617; }
+QSpinBox#durationDigits::up-arrow { image: url("__REWARD_UP__"); width: 8px; height: 5px; }
+QSpinBox#durationDigits::down-arrow { image: url("__REWARD_DOWN__"); width: 8px; height: 5px; }
+QSpinBox#criterionScore::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 17px; height: 13px; border: none; }
+QSpinBox#criterionScore::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 17px; height: 13px; border: none; }
+QSpinBox#criterionScore::up-button:hover, QSpinBox#criterionScore::down-button:hover { background: #273617; }
+QSpinBox#criterionScore::up-arrow { image: url("__REWARD_UP__"); width: 8px; height: 5px; }
+QSpinBox#criterionScore::down-arrow { image: url("__REWARD_DOWN__"); width: 8px; height: 5px; }
+'''.replace('__REWARD_UP__', (Path(__file__).resolve().parent / 'assets' / 'step-up.svg').as_posix()).replace('__REWARD_DOWN__', (Path(__file__).resolve().parent / 'assets' / 'step-down.svg').as_posix())

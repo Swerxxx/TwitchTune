@@ -1,0 +1,7 @@
+PySide6>=6.8,<7
+yt-dlp[default]>=2026.3.17
+requests>=2.32,<3
+websocket-client>=1.8,<2
+keyring>=25,<27
+mutagen>=1.47,<2
+yt-dlp-yandex-music==2026.9.24

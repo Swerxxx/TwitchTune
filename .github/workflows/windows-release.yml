@@ -1,0 +1,86 @@
+name: Windows release
+on:
+  push:
+    branches: [main]
+    paths: ['release_version.py', '.github/workflows/windows-release.yml']
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, for example 1.0.1 (three numbers)'
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Release tools prerequisite
+        run: python -m pip install "requests>=2.32,<3"
+      - name: Choose and validate release
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:INPUT_VERSION
+          if (-not $version) {
+            if ($env:GITHUB_REF_TYPE -eq 'tag') { $version = $env:GITHUB_REF_NAME.TrimStart('v') }
+            else { $version = python -c "from release_version import VERSION; print(VERSION)" }
+          }
+          python -c "from binary_updates import version_tuple; import sys; version_tuple(sys.argv[1])" "$version"
+          if ($LASTEXITCODE -ne 0) { throw 'Invalid version.' }
+          $existing = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list existing releases.' }
+          if ($existing | Where-Object { $_.tagName -eq "v$version" }) { throw 'This release already exists. Choose a higher version.' }
+          "TT_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          python tools/prepare_binary_release.py stamp --version "$version" --repository "$env:GITHUB_REPOSITORY"
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          ./build_exe.ps1 -Python python
+      - name: Offline checks
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_AUDIO_BACKEND: windows
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+      - name: Start compiled application
+        shell: pwsh
+        run: |
+          $testProfileDir = Join-Path $env:RUNNER_TEMP 'TwitchTune-smoke'
+          New-Item -ItemType Directory -Force -Path "$testProfileDir/updates" | Out-Null
+          $env:TWITCHTUNE_PROFILE_DIR=$testProfileDir
+          $env:QT_QPA_PLATFORM='offscreen'
+          $health=Join-Path $testProfileDir 'updates/startup.ready'
+          $process=Start-Process -FilePath './dist/TwitchTune/TwitchTune.exe' -ArgumentList '--smoke-test','--update-health-file',"`"$health`"" -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $health)) { throw 'Compiled application failed to start.' }
+      - name: Package and verify release
+        shell: pwsh
+        run: |
+          python tools/prepare_binary_release.py package --version "$env:TT_RELEASE_VERSION" --repository "$env:GITHUB_REPOSITORY"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
+      - name: Windows installation and rollback check
+        shell: pwsh
+        run: |
+          ./tools/test_windows_updater.ps1 -Version "$env:TT_RELEASE_VERSION"
+      - name: Publish complete release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$env:TT_RELEASE_VERSION" ./release/TwitchTune-Windows-x64.zip ./release/latest.json --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "TwitchTune $env:TT_RELEASE_VERSION" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Publishing failed.' }
