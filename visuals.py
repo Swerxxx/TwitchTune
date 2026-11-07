@@ -10,7 +10,10 @@ from theme import THEMES, goth_button_image, theme_color, normalize_theme
 class Themed:
     def theme_key(self):
         widget = self if isinstance(self, QWidget) else self.parent()
-        return normalize_theme(getattr(widget.window(), 'theme_key', 'green'))
+        window = widget.window()
+        if getattr(window, 'interface_style', 'classic') == 'dark_goth':
+            return 'dark_goth'
+        return normalize_theme(getattr(window, 'theme_key', 'green'))
     def ink(self, value):
         return QColor(theme_color(value, self.theme_key()))
 
@@ -24,12 +27,38 @@ def screw(p, x, y, key='green'):
     p.drawLine(QPointF(x-1.5, y+1), QPointF(x+1.5, y-1))
 
 
+def bevelled_outline(rect, cut):
+    x1, y1, x2, y2 = rect.left(), rect.top(), rect.right(), rect.bottom()
+    return QPolygonF([
+        QPointF(x1 + cut, y1), QPointF(x2 - cut, y1),
+        QPointF(x2, y1 + cut), QPointF(x2, y2 - cut),
+        QPointF(x2 - cut, y2), QPointF(x1 + cut, y2),
+        QPointF(x1, y2 - cut), QPointF(x1, y1 + cut),
+    ])
+
+
 class Chassis(Themed, QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), self.ink('#090b09'))
         w, h = self.width(), self.height()
+        if self.theme_key() == 'dark_goth':
+            glow = QRadialGradient(w * .5, 0, max(w, h) * .75)
+            glow.setColorAt(0, QColor('#30202f'))
+            glow.setColorAt(1, QColor('#100c13'))
+            p.fillRect(self.rect(), glow)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor('#48323f'), 1))
+            p.drawPolygon(bevelled_outline(QRectF(self.rect()).adjusted(6, 6, -6, -6), 14))
+            p.setPen(QPen(QColor('#2c202d'), 1))
+            for y in range(18, h, 28):
+                for x in range(18, w, 32):
+                    p.drawPolyline(QPolygonF([
+                        QPointF(x - 5, y), QPointF(x, y - 7),
+                        QPointF(x + 5, y), QPointF(x, y + 7), QPointF(x - 5, y),
+                    ]))
+            return
         p.setPen(QPen(self.ink('#161c10'), 1))
         for offset in range(-300, 420, 26):
             p.drawLine(w - 260 + offset, 0, w + offset, 210)
@@ -71,7 +100,7 @@ class TransportButton(Themed, QPushButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-        if getattr(self.window(), 'button_style', 'classic') == 'dark_goth':
+        if self.theme_key() == 'dark_goth':
             active = self.isEnabled() and (
                 self.underMouse() or self.hasFocus() or self.isDown() or self.kind == 'play')
             path = goth_button_image(active)
@@ -185,7 +214,10 @@ class QueueDelegate(Themed, QStyledItemDelegate):
         g.setColorAt(0, self.ink('#263018' if selected else '#1a1e17'))
         g.setColorAt(1, self.ink('#10150a' if selected else '#10130e'))
         p.setBrush(g); p.setPen(QPen(self.ink('#c6f52b') if selected else self.ink('#343c2a'), 1))
-        p.drawRoundedRect(r, 9, 9)
+        if self.theme_key() == 'dark_goth':
+            p.drawPolygon(bevelled_outline(r, 9))
+        else:
+            p.drawRoundedRect(r, 9, 9)
         if playing:
             p.fillRect(QRectF(r.left()+1, r.top()+12, 3, r.height()-24), self.ink('#c6f52b'))
         x, y = r.left(), r.top()

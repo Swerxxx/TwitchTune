@@ -78,6 +78,15 @@ def normalize_theme(key):
 
 
 def theme_color(value, key='green'):
+    if key == 'dark_goth':
+        if value.lower() == '#c6f52b':
+            return '#d79a9c'
+        rgb = tuple(int(value[i:i+2], 16) / 255 for i in (1, 3, 5))
+        _, lightness, _ = colorsys.rgb_to_hls(*rgb)
+        hue = .83 if lightness < .32 else .055
+        saturation = .19 if lightness < .32 else .26
+        channels = colorsys.hls_to_rgb(hue, lightness, saturation)
+        return '#' + ''.join(f'{round(channel * 255):02x}' for channel in channels)
     key = normalize_theme(key)
     if key == 'green':
         return value
@@ -93,11 +102,11 @@ def theme_color(value, key='green'):
     return '#' + ''.join(f'{round(channel*255):02x}' for channel in rgb)
 
 
-BUTTON_STYLES = {'classic': 'Базовый', 'dark_goth': 'Dark Goth'}
+INTERFACE_STYLES = {'classic': 'Базовый', 'dark_goth': 'Dark Goth'}
 
 
-def normalize_button_style(key):
-    return key if isinstance(key, str) and key in BUTTON_STYLES else 'classic'
+def normalize_interface_style(key):
+    return key if isinstance(key, str) and key in INTERFACE_STYLES else 'classic'
 
 
 def goth_button_image(active=False):
@@ -105,12 +114,74 @@ def goth_button_image(active=False):
     return (Path(__file__).resolve().parent / 'assets' / name).as_posix()
 
 
-def stylesheet(key='green', button_style='classic'):
-    base = re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: theme_color(match.group(), key), STYLE)
-    if button_style != 'dark_goth':
+def stylesheet(key='green', interface_style='classic'):
+    palette = 'dark_goth' if interface_style == 'dark_goth' else key
+    base = re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: theme_color(match.group(), palette), STYLE)
+    if interface_style != 'dark_goth':
         return base
-    return base + GOTH_BUTTON_STYLE.replace('__GOTH__', goth_button_image()).replace(
+    panel = (Path(__file__).resolve().parent / 'assets' / 'goth-panel.svg').as_posix()
+    arrow = (Path(__file__).resolve().parent / 'assets' / 'step-down.svg').as_posix()
+    surfaces = GOTH_SURFACES.replace('__GOTH_PANEL__', panel).replace('__GOTH_ARROW__', arrow)
+    buttons = GOTH_BUTTON_STYLE.replace('__GOTH__', goth_button_image()).replace(
         '__GOTH_ACTIVE__', goth_button_image(active=True))
+    return base + surfaces + buttons
+
+
+GOTH_SURFACES = """
+QMainWindow, QDialog { background: #100c13; }
+QDialog QWidget { background-color: #18121c; }
+QFrame#metal, QFrame#dock, QGroupBox, QFrame#lyricsPaper {
+    background: transparent;
+    border: 8px solid transparent;
+    border-radius: 0;
+    border-image: url("__GOTH_PANEL__") 26 26 26 26 stretch stretch;
+}
+QGroupBox { padding: 10px 4px 4px; }
+QGroupBox::title {
+    color: #deb6af;
+    background: #18121c;
+    font: bold 9pt "Georgia";
+}
+QLabel#brand { color: #ede0d5; font: bold 24pt "Georgia"; }
+QLabel#brandMark {
+    border: 6px solid transparent;
+    border-radius: 0;
+    border-image: url("__GOTH_PANEL__") 26 26 26 26 stretch stretch;
+    background: #1d1420;
+    color: #e1b3a7;
+    font: bold 20pt "Georgia";
+}
+QLabel#section, QLabel#acid { font: bold 10pt "Georgia"; color: #deb6af; }
+QLabel#lyricsTitle { font: bold 23pt "Georgia"; }
+QLabel#micro { color: #aa929f; }
+QLabel#muted { color: #b5a3ad; }
+QLabel#coverBadge {
+    background: #211620;
+    border-radius: 2px;
+    border-color: #75505e;
+    color: #e1b3a7;
+    font: bold 16pt "Georgia";
+}
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QSpinBox#criterionScore, QSpinBox#durationDigits {
+    background: #100c13;
+    border-radius: 2px;
+    border-color: #5c444f;
+    selection-background-color: #683643;
+    selection-color: #fff0e5;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus,
+QSpinBox#criterionScore:focus, QSpinBox#durationDigits:focus { border-color: #ce9091; }
+QComboBox::down-arrow { image: url("__GOTH_ARROW__"); width: 10px; height: 6px; }
+QComboBox QAbstractItemView { background: #1c151f; selection-background-color: #683643; }
+QListWidget::item:selected { background: #482530; color: #f7ded2; }
+QFrame#rewardCard, QLabel#rewardBadge, QCheckBox#rewardCheck::indicator { border-radius: 2px; }
+QFrame#rewardCard[selected="true"] { border-color: #a36775; background: #30202c; }
+QSlider::groove:horizontal { background: #412b38; border-radius: 0; }
+QSlider::sub-page:horizontal { background: #9c5367; border-radius: 0; }
+QSlider::handle:horizontal { background: #e8baab; border-color: #a67480; border-radius: 2px; }
+QScrollBar::handle:vertical { background: #775260; border-radius: 1px; }
+QTextEdit#lyricsBody { selection-background-color: #683643; }
+"""
 
 
 GOTH_BUTTON_STYLE = """
@@ -119,11 +190,12 @@ QPushButton, QPushButton#primary, QPushButton#nav, QPushButton#score, QPushButto
     border: 8px solid transparent;
     border-radius: 0;
     border-image: url("__GOTH__") 12 18 12 18 stretch stretch;
-    padding: 1px 9px;
+    padding: 1px 5px;
     color: #e2d4cb;
 }
 QPushButton#primary { color: #fff0da; font-weight: bold; }
-QPushButton#nav { padding: 6px 8px; }
+QPushButton#nav { padding: 4px 8px; }
+QPushButton#nav[compact="true"] { padding: 4px 2px; }
 QPushButton#score, QPushButton#lyricsButton { border-width: 5px 7px; padding: 1px 4px; }
 QPushButton:hover, QPushButton:focus, QPushButton:checked, QPushButton:pressed,
 QPushButton#primary, QPushButton#nav:checked, QPushButton#score:checked,

@@ -22,7 +22,7 @@ from binary_update_settings import BinaryUpdateSettings
 from core import QueueStore, load_config, save_config, telegram_request, telegram_delivery_note, parse_link
 from media import Downloader, search, load_saved_cover, soundcloud_lyrics
 from twitch import TwitchClient
-from theme import BUTTON_STYLES, THEMES, normalize_button_style, normalize_theme, stylesheet
+from theme import INTERFACE_STYLES, THEMES, normalize_interface_style, normalize_theme, stylesheet
 from visuals import Chassis, DeckDisplay, ElideLabel, TransportButton, QueueDelegate, ThemeCard
 from telegram_support import TelegramClient, TelegramInbox
 from lyrics import LyricsClient, song_query
@@ -193,7 +193,7 @@ class Main(QMainWindow):
         self.store = QueueStore(str(APP / 'queue.sqlite3'))
         self.cfg = load_config(APP)
         self.theme_key = normalize_theme(self.cfg.get('theme', 'green'))
-        self.button_style = normalize_button_style(self.cfg.get('button_style'))
+        self.interface_style = normalize_interface_style(self.cfg.get('interface_style', self.cfg.get('button_style')))
         self.client = None
         self.current = None
         self.review_id = None
@@ -253,7 +253,7 @@ class Main(QMainWindow):
         return frame
 
     def build(self):
-        self.setStyleSheet(stylesheet(self.theme_key, self.button_style))
+        self.setStyleSheet(stylesheet(self.theme_key, self.interface_style))
         root = Chassis()
         root.setObjectName('shell')
         self.setCentralWidget(root)
@@ -269,7 +269,8 @@ class Main(QMainWindow):
         wordmark = QVBoxLayout()
         wordmark.setSpacing(0)
         wordmark.addWidget(self.label('TWITCHTUNE', 'brand'))
-        wordmark.addWidget(self.label('ACID DECK  /  STREAM MUSIC SYSTEM', 'micro'))
+        self.wordmark_subtitle = self.label('', 'micro')
+        wordmark.addWidget(self.wordmark_subtitle)
         header.addLayout(wordmark)
         header.addStretch()
         header.addWidget(self.label('VOL. 01    /    DIGITAL AUDIO', 'micro'))
@@ -333,6 +334,7 @@ class Main(QMainWindow):
         rail_lay.addSpacing(15)
         log_button = self.button('Журнал событий', lambda: self.log.setVisible(not self.log.isVisible()), rail_lay)
         log_button.setObjectName('nav')
+        log_button.setProperty('compact', True)
         log_button.setFixedHeight(42)
         self.rail_footer = self.label('TT—01 / LOCAL\nSTREAM AUDIO SYSTEM', 'micro')
         rail_lay.addWidget(self.rail_footer)
@@ -545,20 +547,20 @@ class Main(QMainWindow):
         content.setSpacing(12)
         self.binary_updates=BinaryUpdateSettings(self,APP)
         content.addWidget(self.binary_updates)
-        appearance = QGroupBox('УКРАШЕНИЯ ИНТЕРФЕЙСА')
+        appearance = QGroupBox('ОФОРМЛЕНИЕ ИНТЕРФЕЙСА')
         appearance_layout = QFormLayout(appearance)
-        self.button_style_picker = QComboBox()
-        self.button_style_picker.setAccessibleName('Стиль кнопок')
-        for key, name in BUTTON_STYLES.items():
-            self.button_style_picker.addItem(name, key)
-        self.button_style_picker.setCurrentIndex(self.button_style_picker.findData(self.button_style))
-        self.button_style_picker.currentIndexChanged.connect(self.apply_button_style)
-        appearance_layout.addRow('Стиль кнопок', self.button_style_picker)
+        self.interface_style_picker = QComboBox()
+        self.interface_style_picker.setAccessibleName('Стиль интерфейса')
+        for key, name in INTERFACE_STYLES.items():
+            self.interface_style_picker.addItem(name, key)
+        self.interface_style_picker.setCurrentIndex(self.interface_style_picker.findData(self.interface_style))
+        self.interface_style_picker.currentIndexChanged.connect(self.apply_interface_style)
+        appearance_layout.addRow('Стиль интерфейса', self.interface_style_picker)
         preview = QPushButton('Пример кнопки')
         preview.setCheckable(True)
         preview.setToolTip('Нажми, чтобы увидеть выбранное состояние')
         appearance_layout.addRow('Предпросмотр', preview)
-        description = self.label('Dark Goth — рваные края, потёртый металл и тёплая подсветка.', 'muted')
+        description = self.label('Dark Goth — гравированные рамки, потёртый металл и бордовая подсветка.', 'muted')
         description.setWordWrap(True)
         appearance_layout.addRow(description)
         content.addWidget(appearance)
@@ -568,10 +570,14 @@ class Main(QMainWindow):
         self.vk_settings = VKSettings(self, APP)
         content.addWidget(self.vk_settings)
         self.settings_scroll = scroll
-        content.addWidget(self.label('Цвет интерфейса', 'section'))
+        self.palette_options = QWidget()
+        palette_layout = QVBoxLayout(self.palette_options)
+        palette_layout.setContentsMargins(0, 0, 0, 0)
+        palette_layout.setSpacing(12)
+        palette_layout.addWidget(self.label('Цвет интерфейса', 'section'))
         intro = self.label('Тёмный корпус и аппаратный стиль остаются. Меняются подсветка, дисплей, кнопки и оттенок панелей.', 'muted')
         intro.setWordWrap(True)
-        content.addWidget(intro)
+        palette_layout.addWidget(intro)
         grid = QGridLayout()
         grid.setSpacing(10)
         self.theme_buttons = {}
@@ -580,11 +586,12 @@ class Main(QMainWindow):
             button.clicked.connect(lambda checked=False, value=key: self.apply_theme(value))
             grid.addWidget(button, i//2, i%2)
             self.theme_buttons[key] = button
-        content.addLayout(grid)
+        palette_layout.addLayout(grid)
         self.theme_description = self.label('', 'muted')
         self.theme_description.setWordWrap(True)
-        content.addWidget(self.theme_description)
-        content.addWidget(self.label('Применяется сразу · сохраняется автоматически', 'micro'))
+        palette_layout.addWidget(self.theme_description)
+        palette_layout.addWidget(self.label('Применяется сразу · сохраняется автоматически', 'micro'))
+        content.addWidget(self.palette_options)
         content.addStretch()
         scroll.setWidget(body)
         layout.addWidget(scroll)
@@ -693,9 +700,9 @@ class Main(QMainWindow):
             self.yandex_session_info.setText('Файл сохранён. Нажми «Проверить вход».')
             save_config(APP, self.cfg)
 
-    def apply_button_style(self, index):
-        self.button_style = normalize_button_style(self.button_style_picker.itemData(index))
-        self.cfg['button_style'] = self.button_style
+    def apply_interface_style(self, index):
+        self.interface_style = normalize_interface_style(self.interface_style_picker.itemData(index))
+        self.cfg['interface_style'] = self.interface_style
         self.apply_theme(self.theme_key, persist=False)
         try:
             save_config(APP, self.cfg)
@@ -704,7 +711,13 @@ class Main(QMainWindow):
 
     def apply_theme(self, key, persist=True):
         self.theme_key = normalize_theme(key)
-        self.setStyleSheet(stylesheet(self.theme_key, self.button_style))
+        self.setStyleSheet(stylesheet(self.theme_key, self.interface_style))
+        goth = self.interface_style == 'dark_goth'
+        deck = 'DARK GOTH' if goth else 'ACID DECK'
+        self.setWindowTitle(f'TwitchTune · {deck}')
+        self.wordmark_subtitle.setText(f'{deck}  /  STREAM MUSIC SYSTEM')
+        self.palette_options.setVisible(not goth)
+        self.show_cover(self.store.get(self.current) if self.current else None)
         for value, button in self.theme_buttons.items():
             button.setChecked(value == self.theme_key)
         theme = THEMES[self.theme_key]
@@ -910,11 +923,15 @@ class Main(QMainWindow):
 
     def show_cover(self, row):
         path = row.get('cover_path', '') if row else ''
-        key = (row['id'] if row else '', path)
+        key = (row['id'] if row else '', path, self.interface_style)
         if key == self.displayed_cover:
             return
         self.displayed_cover = key
         pixmap = QPixmap(path) if path else QPixmap()
+        if pixmap.isNull() and self.interface_style == 'dark_goth':
+            self.cover_badge.setText('TT')
+            self.cover_badge.setToolTip(row['title'] if row else 'TwitchTune')
+            return
         if pixmap.isNull():
             pixmap = QIcon(str(APP_ICON)).pixmap(49, 49)
         pixmap = pixmap.scaled(49, 49, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)

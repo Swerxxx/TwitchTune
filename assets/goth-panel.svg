@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="72" viewBox="0 0 100 72">
+  <defs>
+    <linearGradient id="iron" x2="0" y2="1">
+      <stop stop-color="#29202a"/>
+      <stop offset=".19" stop-color="#18131b"/>
+      <stop offset=".84" stop-color="#120f16"/>
+      <stop offset="1" stop-color="#221921"/>
+    </linearGradient>
+  </defs>
+  <path d="M1 14 5 12 5 7 12 5 15 1 85 1 88 5 95 7 95 12 99 14V58L95 60 95 65 88 67 85 71H15L12 67 5 65 5 60 1 58Z"
+        fill="url(#iron)" stroke="#66505c"/>
+  <path d="M4 16 9 13 9 9 15 8 18 4H82L85 8 91 9 91 13 96 16V56L91 59 91 63 85 64 82 68H18L15 64 9 63 9 59 4 56Z"
+        fill="none" stroke="#3b2e39" stroke-width=".75"/>
+  <g fill="none" stroke="#98757b" stroke-width=".9">
+    <path d="M4 25Q7 19 14 16L18 10 23 6 M5 19Q11 18 12 11L20 5 M9 15 15 9"/>
+    <path d="M4 25Q7 19 14 16L18 10 23 6 M5 19Q11 18 12 11L20 5 M9 15 15 9" transform="translate(100 0) scale(-1 1)"/>
+    <path d="M4 25Q7 19 14 16L18 10 23 6 M5 19Q11 18 12 11L20 5 M9 15 15 9" transform="translate(0 72) scale(1 -1)"/>
+    <path d="M4 25Q7 19 14 16L18 10 23 6 M5 19Q11 18 12 11L20 5 M9 15 15 9" transform="translate(100 72) scale(-1 -1)"/>
+  </g>
+  <path d="M36 5 43 4 47 5 M57 67 64 66 68 67 M17 28 28 25 M73 45 83 42"
+        fill="none" stroke="#b6949d" opacity=".24" stroke-width=".6"/>
+</svg>
