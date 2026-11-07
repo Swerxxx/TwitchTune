@@ -30,18 +30,18 @@ class TelegramOrderTests(unittest.TestCase):
         self.bot.handle_update({'callback_query': {
             'message': {'chat': self.chat}, 'from': self.sender, 'id': 'callback', 'data': action}})
 
-    def authorize(self):
+    def authorize(self, twitch_id='42'):
         self.bot.twitch_json = Mock(side_effect=[
             (True, {'verification_uri': 'https://www.twitch.tv/activate?device-code=TEST',
                     'user_code': 'TEST', 'device_code': 'hidden', 'expires_in': 300, 'interval': 5}),
             (True, {'access_token': 'not-stored'}),
-            (True, {'client_id': 'client', 'login': 'viewer', 'user_id': '42'}),
+            (True, {'client_id': 'client', 'login': 'viewer', 'user_id': twitch_id}),
         ])
         self.message(text='/start')
         self.assertIsNone(self.bot.account('99'))
         self.bot.logins['99']['next_poll'] = 0
         self.callback('login')
-        self.assertEqual(self.bot.account('99')['twitch'], '42')
+        self.assertEqual(self.bot.account('99')['twitch'], twitch_id)
 
     def upload(self):
         self.bot.api.return_value = {'file_path': 'music/file.mp3'}
@@ -107,3 +107,38 @@ class TelegramOrderTests(unittest.TestCase):
         self.chat['type'] = 'group'
         self.message(text='/start')
         self.assertEqual(self.bot.begin_login.call_count, 1)
+
+    def test_unlink_cancels_pending_mp3_and_preserves_ratings_by_twitch_id(self):
+        self.authorize()
+        existing = self.store.add('https://youtu.be/previous', 'viewer', viewer_id='42')
+        self.store.rate(existing, 9)
+        order = self.upload()
+        self.callback('no_lyrics:' + order['code'])
+        self.callback('unlink')
+        nonce = self.bot.unlink_requests['99'][0]
+        self.assertIsNotNone(self.bot.account('99'))
+        self.callback('confirm_unlink:wrong')
+        self.assertIsNotNone(self.bot.account('99'))
+        self.callback('confirm_unlink:' + nonce)
+        self.assertIsNone(self.bot.account('99'))
+        self.assertFalse((self.bot.folder / (order['id'] + '.mp3')).exists())
+        with self.assertRaisesRegex(ValueError, 'отменён'):
+            self.bot.accept_reward(self.reward(), order['code'])
+        self.authorize('43')
+        self.callback('confirm_unlink:' + nonce)
+        self.assertEqual(self.bot.account('99')['twitch'], '43')
+        self.assertEqual(self.store.get(existing)['rating'], 9)
+        self.callback('profile')
+        self.assertIn('Заявок: 0', self.bot.send.call_args.args[1])
+
+    def test_appearance_registers_commands_and_uploads_avatar_once(self):
+        with patch('telegram_orders.requests.post', return_value=Mock(ok=True)) as post:
+            post.return_value.json.return_value = {'ok': True}
+            self.bot.apply_appearance()
+            self.bot.apply_appearance()
+        post.assert_called_once()
+        self.assertTrue(post.call_args.args[0].endswith('/setMyProfilePhoto'))
+        self.assertTrue(post.call_args.kwargs['files']['avatar'][1].startswith(b'\xff\xd8'))
+        commands = self.bot.api.call_args_list[0].kwargs['commands']
+        self.assertEqual([row['command'] for row in commands],
+                         ['start', 'profile', 'pending', 'cancel', 'unlink', 'help'])

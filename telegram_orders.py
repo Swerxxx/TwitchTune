@@ -1,19 +1,33 @@
 """Private MP3 bot. Telegram drafts become queue entries only through Twitch."""
+import json
 import math
 import re
 import sqlite3
 import time
 import uuid
+from html import escape
 from pathlib import Path
 from queue import Empty, Queue
 from urllib.parse import quote, urlparse
 
 import requests
 from mutagen.mp3 import MP3
+from PySide6.QtCore import QBuffer, QIODevice, Qt
+from PySide6.QtGui import QImageReader
 
 from limits import MAX_TRACK_SECONDS
 from telegram_support import MAX_AGE, MAX_BYTES, TelegramClient, TelegramError, extract_mp3
 from twitch import OAUTH
+
+
+COMMANDS = (
+    ('start', 'Главное меню и вход через Twitch'),
+    ('profile', 'Профиль, заявки и средняя оценка'),
+    ('pending', 'Трек в ожидании и код награды'),
+    ('cancel', 'Отменить подготовку MP3'),
+    ('unlink', 'Отвязать или сменить Twitch'),
+    ('help', 'Все команды и инструкция'),
+)
 
 
 def eligible_rewards(rewards, duration):
@@ -34,9 +48,13 @@ class TelegramOrders(TelegramClient):
         self.rewards = rewards
         self.bot_id = self.token.split(':', 1)[0]
         self.logins = {}
+        self.unlink_requests = {}
         self.notices = Queue()
         with self.store.lock:
             self.store.db.executescript("""
+                CREATE TABLE IF NOT EXISTS tg_bot_appearance (
+                    bot TEXT PRIMARY KEY
+                );
                 CREATE TABLE IF NOT EXISTS tg_viewer_accounts (
                     bot TEXT, telegram TEXT, twitch TEXT, login TEXT,
                     PRIMARY KEY (bot, telegram), UNIQUE (bot, twitch)
@@ -49,8 +67,10 @@ class TelegramOrders(TelegramClient):
                 );
             """)
 
-    def send(self, chat, text, buttons=None):
+    def send(self, chat, text, buttons=None, *, html=False):
         params = {'chat_id': chat, 'text': text}
+        if html:
+            params['parse_mode'] = 'HTML'
         if buttons:
             params['reply_markup'] = {'inline_keyboard': buttons}
         try:
@@ -67,7 +87,12 @@ class TelegramOrders(TelegramClient):
                 if self.api('getWebhookInfo').get('url'):
                     self.emit('Бот настроен на webhook. Используй отдельного бота для TwitchTune.')
                     return
-                self.emit('Бот подключён: @' + me['username'])
+                status = 'Бот подключён: @' + me['username']
+                try:
+                    self.apply_appearance()
+                except TelegramError:
+                    status += ' · оформление не применилось, повторится при переподключении'
+                self.emit(status)
                 while not self.stop.is_set():
                     self.expire_orders()
                     while not self.notices.empty():
@@ -90,6 +115,96 @@ class TelegramOrders(TelegramClient):
             except (OSError, sqlite3.Error):
                 self.emit('Не удалось сохранить данные Telegram. Проверь доступ к папке TwitchTune.')
                 self.stop.wait(8)
+
+    def apply_appearance(self):
+        with self.store.lock:
+            if self.store.db.execute('SELECT 1 FROM tg_bot_appearance WHERE bot=?', (self.bot_id,)).fetchone():
+                return
+        self.api('setMyCommands', commands=[
+            {'command': name, 'description': description} for name, description in COMMANDS
+        ])
+        self.api('setMyDescription', description=(
+            '🎧 TwitchTune · музыкальные заявки\n\nВойди через Twitch, пришли MP3 и текст. '
+            'Бот подскажет награду и выдаст код для заказа. Оценки и статистика доступны в профиле.'
+        ))
+        self.api('setMyShortDescription', short_description='🎧 MP3 для Twitch · заявки, тексты и оценки TwitchTune')
+        icon = QImageReader(str(Path(__file__).resolve().parent / 'assets' / 'twitchtune.ico'))
+        icon.jumpToImage(icon.imageCount() - 1)
+        avatar = icon.read()
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        if avatar.isNull() or not avatar.scaled(512, 512, Qt.KeepAspectRatio, Qt.SmoothTransformation).save(buffer, 'JPEG', 94):
+            raise TelegramError('Не удалось подготовить аватар TwitchTune.')
+        try:
+            response = requests.post(
+                'https://api.telegram.org/bot' + self.token + '/setMyProfilePhoto',
+                data={'photo': json.dumps({'type': 'static', 'photo': 'attach://avatar'})},
+                files={'avatar': ('twitchtune.jpg', bytes(buffer.data()), 'image/jpeg')},
+                timeout=(5, 15), allow_redirects=False,
+            )
+            uploaded = response.ok and response.json().get('ok')
+        except (requests.RequestException, ValueError):
+            uploaded = False
+        if not uploaded:
+            raise TelegramError('Telegram не принял аватар TwitchTune.')
+        with self.store.lock, self.store.db:
+            self.store.db.execute('INSERT OR IGNORE INTO tg_bot_appearance VALUES (?)', (self.bot_id,))
+
+    def send_menu(self, chat):
+        account = self.account(chat)
+        if not account:
+            return self.begin_login(chat)
+        self.send(chat, f'<b>🎧 TWITCHTUNE</b>\n\nTwitch подключён · <b>{escape(account["login"])}</b>\n'
+                  'Пришли MP3, чтобы подготовить заявку на стрим.', [
+                      [{'text': '👤 Мой профиль', 'callback_data': 'profile'},
+                       {'text': '🎵 Моя заявка', 'callback_data': 'pending'}],
+                      [{'text': '📖 Команды и помощь', 'callback_data': 'help'}],
+                  ], html=True)
+
+    def send_help(self, chat):
+        commands = '\n'.join(f'/{name} — {description}' for name, description in COMMANDS)
+        self.send(chat, '<b>📖 Команды TwitchTune</b>\n\n' + commands +
+                  '\n\n<b>Как заказать трек</b>\nВойди через Twitch → пришли MP3 → добавь текст '
+                  'или выбери «Текста нет» → вставь код в указанную награду Twitch.',
+                  [[{'text': '↩ Главное меню', 'callback_data': 'menu'}]], html=True)
+
+    def ask_unlink(self, chat):
+        account = self.account(chat)
+        if not account:
+            return self.begin_login(chat)
+        now = time.monotonic()
+        self.unlink_requests = {key: value for key, value in self.unlink_requests.items() if value[2] > now}
+        nonce = uuid.uuid4().hex
+        self.unlink_requests[chat] = (nonce, account['twitch'], now + 300)
+        self.send(chat, f'<b>Сменить аккаунт Twitch?</b>\n\nСейчас привязан <b>{escape(account["login"])}</b>. '
+                  'Текущая подготовка MP3 и её код будут отменены. Оценки и история принадлежат прежнему Twitch ID.', [
+                      [{'text': 'Отвязать Twitch', 'callback_data': 'confirm_unlink:' + nonce}],
+                      [{'text': '↩ Назад в профиль', 'callback_data': 'profile'}],
+                  ], html=True)
+
+    def unlink(self, chat, nonce):
+        confirmation = self.unlink_requests.get(chat)
+        if not confirmation or confirmation[0] != nonce or confirmation[2] <= time.monotonic():
+            raise ValueError('Подтверждение устарело. Открой профиль и нажми «Сменить Twitch» снова.')
+        self.unlink_requests.pop(chat, None)
+        with self.store.lock, self.store.db:
+            account = self.account(chat)
+            if not account or account['twitch'] != confirmation[1]:
+                raise ValueError('Привязка уже изменилась. Открой главное меню.')
+            order = self.pending(chat)
+            if order:
+                self.store.db.execute("UPDATE tg_mp3_orders SET state='cancelled', lyrics=NULL WHERE id=?",
+                                      (order['id'],))
+            self.store.db.execute('DELETE FROM tg_viewer_accounts WHERE bot=? AND telegram=?', (self.bot_id, chat))
+        if order:
+            try:
+                (self.folder / (order['id'] + '.mp3')).unlink(missing_ok=True)
+            except OSError:
+                self.emit('Привязка снята. Не удалось убрать временный MP3.')
+        self.logins.pop(chat, None)
+        self.send(chat, '<b>Twitch отвязан.</b>\nЧтобы снова отправлять треки, привяжи нужный аккаунт.', [
+            [{'text': 'Войти через Twitch', 'callback_data': 'menu'}],
+        ], html=True)
 
     def account(self, chat):
         with self.store.lock:
@@ -129,11 +244,13 @@ class TelegramOrders(TelegramClient):
                            expires=now + min(1800, int(body.get('expires_in') or 1800)),
                            next_poll=now + interval, interval=interval)
             self.logins[chat] = pending
-        self.send(chat, 'Войди в свой Twitch на официальной странице, подтверди код '
-                  + pending['code'] + ' и вернись сюда.', [
+        self.send(chat, '<b>🎧 TWITCHTUNE</b>\n<i>Музыкальные заявки на стрим</i>\n\n'
+                  'Войди в свой Twitch и подтверди код <code>' + escape(pending['code']) +
+                  '</code>. После этого вернись сюда и нажми «Проверить вход».', [
                       [{'text': 'Войти через Twitch', 'url': pending['url']}],
-                      [{'text': 'Проверить вход', 'callback_data': 'login'}],
-                  ])
+                      [{'text': '✓ Проверить вход', 'callback_data': 'login'}],
+                      [{'text': '📖 Команды и помощь', 'callback_data': 'help'}],
+                  ], html=True)
 
     def finish_login(self, chat):
         if self.account(chat):
@@ -174,9 +291,7 @@ class TelegramOrders(TelegramClient):
                                       (self.bot_id, chat, twitch_id, login))
         except sqlite3.IntegrityError:
             raise ValueError('Этот аккаунт Twitch уже привязан к другому Telegram.') from None
-        self.send(chat, f'Twitch привязан: {login}. Теперь пришли MP3.', [
-            [{'text': 'Мой профиль', 'callback_data': 'profile'}],
-        ])
+        self.send_menu(chat)
 
     def send_profile(self, chat):
         account = self.account(chat)
@@ -189,8 +304,17 @@ class TelegramOrders(TelegramClient):
         rated = profile['rated'] if profile else 0
         average = profile['average66'] if profile else None
         score = f'{average:.2f}/66' if average is not None else 'пока нет оценок'
-        self.send(chat, f'Профиль Twitch · {name}\nЗаявок: {total}\nОценено: {rated}\nСредняя оценка: {score}',
-                  [[{'text': 'Мой MP3 в ожидании', 'callback_data': 'pending'}]])
+        filled = max(0, min(10, round(average / 66 * 10))) if average is not None else 0
+        bar = '▰' * filled + '▱' * (10 - filled)
+        self.send(chat, f'<b>👤 Профиль TwitchTune</b>\n'
+                  f'Twitch · <b>{escape(name)}</b>\n\n'
+                  f'🎵 Заявок: {total}\n⭐ Оценено: {rated}\n'
+                  f'<b>Средняя оценка</b> · {score}\n<code>{bar}</code>', [
+                      [{'text': '↻ Обновить', 'callback_data': 'profile'},
+                       {'text': '🎵 Моя заявка', 'callback_data': 'pending'}],
+                      [{'text': '🔗 Сменить Twitch', 'callback_data': 'unlink'}],
+                      [{'text': '↩ Главное меню', 'callback_data': 'menu'}],
+                  ], html=True)
 
     def pending(self, chat):
         with self.store.lock:
@@ -286,20 +410,28 @@ class TelegramOrders(TelegramClient):
 
     def send_pending(self, chat):
         order = self.pending(chat)
+        menu = [{'text': '↩ Главное меню', 'callback_data': 'menu'}]
         if not order:
-            return self.send(chat, 'Нет MP3 в ожидании. Пришли новый трек.')
+            return self.send(chat, '<b>🎵 Моя заявка</b>\n\nНет MP3 в ожидании. Пришли новый трек.',
+                             [menu], html=True)
         code = order['code']
-        if order['lyrics'] is None:
-            return self.send(chat, 'MP3 получен. Пришли текст песни одним сообщением или нажми кнопку.',
-                             [[{'text': 'Текста нет', 'callback_data': 'no_lyrics:' + code}]])
-        rewards = eligible_rewards(self.rewards(), order['duration'])
         seconds = math.ceil(order['duration'])
+        header = f'<b>🎵 {escape(order["title"])}</b>\n⏱ {seconds // 60}:{seconds % 60:02}\n\n'
+        if order['lyrics'] is None:
+            return self.send(chat, header + '<b>Шаг 2 · Текст песни</b>\n'
+                             'Пришли текст одним сообщением или нажми кнопку.', [
+                                 [{'text': 'Текста нет', 'callback_data': 'no_lyrics:' + code}], menu,
+                             ], html=True)
+        rewards = eligible_rewards(self.rewards(), order['duration'])
         if not rewards:
-            return self.send(chat, f'Трек {seconds // 60}:{seconds % 60:02}. Сейчас нет подходящей награды. '
-                                  'Уточни у стримера и проверь через /pending.')
+            return self.send(chat, header + 'Сейчас нет подходящей награды. '
+                             'Уточни у стримера и проверь ещё раз.', [
+                                 [{'text': '↻ Проверить награды', 'callback_data': 'pending'}], menu,
+                             ], html=True)
         names = ' / '.join(title for _, _, title in rewards)
-        self.send(chat, f'Трек {seconds // 60}:{seconds % 60:02}. Выбери на Twitch награду «{names}».\n'
-                        f'Вставь в поле награды:\nв тг {code}\nКод действует 24 часа с загрузки MP3.')
+        self.send(chat, header + f'<b>Шаг 3 · Награда Twitch</b>\nВыбери «{escape(names)}» '
+                  f'и вставь в её поле:\n\n<code>в тг {code}</code>\n\n'
+                  'Код действует 24 часа с загрузки MP3.', [menu], html=True)
 
     def save_lyrics(self, chat, order, lyrics):
         with self.store.lock, self.store.db:
@@ -326,7 +458,16 @@ class TelegramOrders(TelegramClient):
                 if action == 'login':
                     return self.finish_login(chat)
                 if action == 'profile':
+                    self.unlink_requests.pop(chat, None)
                     return self.send_profile(chat)
+                if action == 'menu':
+                    return self.send_menu(chat)
+                if action == 'help':
+                    return self.send_help(chat)
+                if action == 'unlink':
+                    return self.ask_unlink(chat)
+                if action.startswith('confirm_unlink:'):
+                    return self.unlink(chat, action.split(':', 1)[1])
                 if action == 'pending' and self.account(chat):
                     return self.send_pending(chat)
                 order = self.pending(chat)
@@ -335,11 +476,17 @@ class TelegramOrders(TelegramClient):
                 return
             text = message.get('text', '').strip()
             command = text.split(maxsplit=1)[0].lower() if text.startswith('/') else ''
+            if command == '/help':
+                return self.send_help(chat)
             account = self.account(chat)
             if not account:
                 return self.begin_login(chat)
-            if command in ('/start', '/profile'):
+            if command == '/start':
+                return self.send_menu(chat)
+            if command == '/profile':
                 return self.send_profile(chat)
+            if command == '/unlink':
+                return self.ask_unlink(chat)
             if command == '/pending':
                 return self.send_pending(chat)
             if command == '/cancel':
@@ -352,7 +499,7 @@ class TelegramOrders(TelegramClient):
             order = self.pending(chat)
             if text and not command and order and order['lyrics'] is None:
                 return self.save_lyrics(chat, order, text)
-            self.send(chat, 'Пришли MP3. Команды: /profile, /pending, /cancel.')
+            self.send_menu(chat)
         except ValueError as exc:
             self.send(chat, str(exc))
 
