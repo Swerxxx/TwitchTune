@@ -55,6 +55,7 @@ QFrame#lyricsPaper { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #151
 # QPainter surfaces, rather than recoloring only Qt's standard controls.
 import colorsys
 import re
+from pathlib import Path
 
 THEMES = {
     'violet': dict(name='Фиолетовый', tag='PHANTOM VIOLET', accent='#b58aea',
@@ -92,8 +93,65 @@ def theme_color(value, key='green'):
     return '#' + ''.join(f'{round(channel*255):02x}' for channel in rgb)
 
 
-def stylesheet(key='green'):
-    return re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: theme_color(match.group(), key), STYLE)
+BUTTON_STYLES = {'classic': 'Базовый', 'dark_goth': 'Dark Goth'}
+
+
+def normalize_button_style(key):
+    return key if isinstance(key, str) and key in BUTTON_STYLES else 'classic'
+
+
+def goth_button_image(active=False):
+    name = 'goth-button-active.svg' if active else 'goth-button.svg'
+    return (Path(__file__).resolve().parent / 'assets' / name).as_posix()
+
+
+def stylesheet(key='green', button_style='classic'):
+    base = re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: theme_color(match.group(), key), STYLE)
+    if button_style != 'dark_goth':
+        return base
+    return base + GOTH_BUTTON_STYLE.replace('__GOTH__', goth_button_image()).replace(
+        '__GOTH_ACTIVE__', goth_button_image(active=True))
+
+
+GOTH_BUTTON_STYLE = """
+QPushButton, QPushButton#primary, QPushButton#nav, QPushButton#score, QPushButton#lyricsButton {
+    background: transparent;
+    border: 8px solid transparent;
+    border-radius: 0;
+    border-image: url("__GOTH__") 12 18 12 18 stretch stretch;
+    padding: 1px 9px;
+    color: #e2d4cb;
+}
+QPushButton#primary { color: #fff0da; font-weight: bold; }
+QPushButton#nav { padding: 6px 8px; }
+QPushButton#score, QPushButton#lyricsButton { border-width: 5px 7px; padding: 1px 4px; }
+QPushButton:hover, QPushButton:focus, QPushButton:checked, QPushButton:pressed,
+QPushButton#primary, QPushButton#nav:checked, QPushButton#score:checked,
+QPushButton#nav:hover, QPushButton#nav:focus, QPushButton#nav:pressed,
+QPushButton#score:hover, QPushButton#score:focus, QPushButton#score:pressed,
+QPushButton#lyricsButton:hover, QPushButton#lyricsButton:focus, QPushButton#lyricsButton:pressed {
+    border-image: url("__GOTH_ACTIVE__") 12 18 12 18 stretch stretch;
+    color: #fff0da;
+}
+QPushButton#nav:checked {
+    background: transparent;
+    border-width: 8px;
+}
+QPushButton#score:checked { background: transparent; }
+QPushButton:checked, QPushButton#nav:checked, QPushButton#score:checked {
+    color: #ffd18e;
+    font-weight: bold;
+}
+QPushButton:pressed, QPushButton#primary:pressed, QPushButton#nav:pressed,
+QPushButton#score:pressed, QPushButton#lyricsButton:pressed { color: #cdb8b0; }
+QPushButton:disabled, QPushButton#primary:disabled, QPushButton#nav:disabled,
+QPushButton#score:disabled, QPushButton#lyricsButton:disabled {
+    background: transparent;
+    border-image: url("__GOTH__") 12 18 12 18 stretch stretch;
+    color: #a09596;
+}
+"""
+
 
 STYLE += '''
 QLabel#brandMark { border: 1px solid #b5df29; border-radius: 15px; background: #19220b; color: #c6f52b; font: bold 20pt "Bahnschrift"; }
@@ -123,7 +181,6 @@ QScrollArea#rewardScroll > QWidget { background: transparent; }
 '''
 
 
-from pathlib import Path
 STYLE += '''
 QSpinBox#durationDigits::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 20px; height: 25px; border: none; }
 QSpinBox#durationDigits::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 20px; height: 25px; border: none; }

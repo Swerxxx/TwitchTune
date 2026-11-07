@@ -22,7 +22,7 @@ from binary_update_settings import BinaryUpdateSettings
 from core import QueueStore, load_config, save_config, telegram_request, telegram_delivery_note, parse_link
 from media import Downloader, search, load_saved_cover, soundcloud_lyrics
 from twitch import TwitchClient
-from theme import THEMES, stylesheet, normalize_theme
+from theme import BUTTON_STYLES, THEMES, normalize_button_style, normalize_theme, stylesheet
 from visuals import Chassis, DeckDisplay, ElideLabel, TransportButton, QueueDelegate, ThemeCard
 from telegram_support import TelegramClient, TelegramInbox
 from lyrics import LyricsClient, song_query
@@ -193,6 +193,7 @@ class Main(QMainWindow):
         self.store = QueueStore(str(APP / 'queue.sqlite3'))
         self.cfg = load_config(APP)
         self.theme_key = normalize_theme(self.cfg.get('theme', 'green'))
+        self.button_style = normalize_button_style(self.cfg.get('button_style'))
         self.client = None
         self.current = None
         self.review_id = None
@@ -252,7 +253,7 @@ class Main(QMainWindow):
         return frame
 
     def build(self):
-        self.setStyleSheet(stylesheet(self.theme_key))
+        self.setStyleSheet(stylesheet(self.theme_key, self.button_style))
         root = Chassis()
         root.setObjectName('shell')
         self.setCentralWidget(root)
@@ -544,6 +545,23 @@ class Main(QMainWindow):
         content.setSpacing(12)
         self.binary_updates=BinaryUpdateSettings(self,APP)
         content.addWidget(self.binary_updates)
+        appearance = QGroupBox('УКРАШЕНИЯ ИНТЕРФЕЙСА')
+        appearance_layout = QFormLayout(appearance)
+        self.button_style_picker = QComboBox()
+        self.button_style_picker.setAccessibleName('Стиль кнопок')
+        for key, name in BUTTON_STYLES.items():
+            self.button_style_picker.addItem(name, key)
+        self.button_style_picker.setCurrentIndex(self.button_style_picker.findData(self.button_style))
+        self.button_style_picker.currentIndexChanged.connect(self.apply_button_style)
+        appearance_layout.addRow('Стиль кнопок', self.button_style_picker)
+        preview = QPushButton('Пример кнопки')
+        preview.setCheckable(True)
+        preview.setToolTip('Нажми, чтобы увидеть выбранное состояние')
+        appearance_layout.addRow('Предпросмотр', preview)
+        description = self.label('Dark Goth — рваные края, потёртый металл и тёплая подсветка.', 'muted')
+        description.setWordWrap(True)
+        appearance_layout.addRow(description)
+        content.addWidget(appearance)
         self.donation_settings=DonationSettings(self,APP)
         content.addWidget(self.donation_settings)
         self.build_yandex_settings(content)
@@ -675,9 +693,18 @@ class Main(QMainWindow):
             self.yandex_session_info.setText('Файл сохранён. Нажми «Проверить вход».')
             save_config(APP, self.cfg)
 
+    def apply_button_style(self, index):
+        self.button_style = normalize_button_style(self.button_style_picker.itemData(index))
+        self.cfg['button_style'] = self.button_style
+        self.apply_theme(self.theme_key, persist=False)
+        try:
+            save_config(APP, self.cfg)
+        except OSError:
+            QMessageBox.warning(self, 'Настройки', 'Стиль применён, но сохранить выбор не удалось.')
+
     def apply_theme(self, key, persist=True):
         self.theme_key = normalize_theme(key)
-        self.setStyleSheet(stylesheet(self.theme_key))
+        self.setStyleSheet(stylesheet(self.theme_key, self.button_style))
         for value, button in self.theme_buttons.items():
             button.setChecked(value == self.theme_key)
         theme = THEMES[self.theme_key]

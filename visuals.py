@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QRectF, QPointF, QSize, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen, QFont, QLinearGradient, QRadialGradient, QPolygonF, QPixmap, QPixmapCache
 from PySide6.QtWidgets import QWidget, QPushButton, QLabel, QStyledItemDelegate, QStyle
-from theme import THEMES, theme_color, normalize_theme
+from theme import THEMES, goth_button_image, theme_color, normalize_theme
 
 class Themed:
     def theme_key(self):
@@ -71,17 +71,28 @@ class TransportButton(Themed, QPushButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         r = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-        g = QLinearGradient(0, 0, 0, self.height())
-        g.setColorAt(0, self.ink('#4b5142'))
-        g.setColorAt(.35, self.ink('#181c15'))
-        g.setColorAt(.65, self.ink('#050705'))
-        g.setColorAt(1, self.ink('#292f20'))
-        p.setBrush(g)
-        p.setPen(QPen(self.ink('#c6f52b') if self.underMouse() or self.kind == 'play' else self.ink('#626c48'), 1.3))
-        p.drawEllipse(r)
-        if self.hasFocus():
-            p.setPen(QPen(self.ink('#c6f52b'), 1, Qt.DotLine))
-            p.drawEllipse(r.adjusted(-1, -1, 1, 1))
+        if getattr(self.window(), 'button_style', 'classic') == 'dark_goth':
+            active = self.isEnabled() and (
+                self.underMouse() or self.hasFocus() or self.isDown() or self.kind == 'play')
+            path = goth_button_image(active)
+            frame = QPixmapCache.find(path)
+            if frame is None:
+                frame = QPixmap(path)
+                QPixmapCache.insert(path, frame)
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.drawPixmap(r, frame, QRectF(frame.rect()))
+        else:
+            g = QLinearGradient(0, 0, 0, self.height())
+            g.setColorAt(0, self.ink('#4b5142'))
+            g.setColorAt(.35, self.ink('#181c15'))
+            g.setColorAt(.65, self.ink('#050705'))
+            g.setColorAt(1, self.ink('#292f20'))
+            p.setBrush(g)
+            p.setPen(QPen(self.ink('#c6f52b') if self.underMouse() or self.kind == 'play' else self.ink('#626c48'), 1.3))
+            p.drawEllipse(r)
+            if self.hasFocus():
+                p.setPen(QPen(self.ink('#c6f52b'), 1, Qt.DotLine))
+                p.drawEllipse(r.adjusted(-1, -1, 1, 1))
         p.setPen(Qt.NoPen)
         p.setBrush(self.ink('#c6f52b'))
         cx, cy = self.width()/2, self.height()/2 + (1 if self.isDown() else 0)
