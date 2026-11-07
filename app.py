@@ -24,7 +24,8 @@ from media import Downloader, search, load_saved_cover, soundcloud_lyrics
 from twitch import TwitchClient
 from theme import INTERFACE_STYLES, THEMES, normalize_interface_style, normalize_theme, stylesheet
 from visuals import Chassis, DeckDisplay, ElideLabel, TransportButton, QueueDelegate, ThemeCard
-from telegram_support import TelegramClient, TelegramInbox
+from telegram_support import TelegramClient, TelegramError, TelegramInbox
+from telegram_orders import TelegramOrders
 from lyrics import LyricsClient, song_query
 from lyrics_window import LyricsDialog
 from lyrics_resolver import LyricsResolver
@@ -210,6 +211,8 @@ class Main(QMainWindow):
         self.jobs = []
         self.closing = False
         self.telegram = None
+        self.telegram_orders = None
+        self.telegram_reward_options = ()
         self.telegram_clients = []
         self.telegram_inbox = TelegramInbox(self.store)
         self.incoming.connect(self.handle_event, Qt.QueuedConnection)
@@ -233,6 +236,7 @@ class Main(QMainWindow):
                 self.down.submit(row['id'])
         self.login_if_ready()
         self.telegram_if_ready()
+        self.start_private_bot_if_ready()
         self.donation_settings.autostart()
 
     def button(self, label, callback, layout):
@@ -564,6 +568,21 @@ class Main(QMainWindow):
         description.setWordWrap(True)
         appearance_layout.addRow(description)
         content.addWidget(appearance)
+        bot_box = QGroupBox('TELEGRAM · ПРИЁМ MP3')
+        bot_layout = QVBoxLayout(bot_box)
+        bot_hint = QLabel('Зритель входит через Twitch в личном чате бота, отправляет MP3 и текст. '
+                          'Трек попадает в очередь только после подходящей награды с кодом от бота.')
+        bot_hint.setWordWrap(True)
+        bot_layout.addWidget(bot_hint)
+        self.private_bot_status = QLabel('Бот не подключён')
+        self.private_bot_status.setTextFormat(Qt.PlainText)
+        self.private_bot_status.setWordWrap(True)
+        bot_layout.addWidget(self.private_bot_status)
+        actions = QHBoxLayout()
+        self.button('Подключить бота', self.configure_private_bot, actions)
+        self.button('Отключить', self.stop_private_bot, actions)
+        bot_layout.addLayout(actions)
+        content.addWidget(bot_box)
         self.donation_settings=DonationSettings(self,APP)
         content.addWidget(self.donation_settings)
         self.build_yandex_settings(content)
@@ -881,6 +900,14 @@ class Main(QMainWindow):
         artist, title = song_query(row)
         self.lyrics_button.setText('Ищем текст…')
         self.lyrics_button.setEnabled(False)
+        if row.get('submitted_lyrics') is not None:
+            text = row['submitted_lyrics']
+            self.lyrics_candidates = ([dict(artistName=artist, trackName=title or row['title'],
+                                            plainLyrics=text, source='Текст от зрителя')] if text else [])
+            self.lyrics_button.setText('Текст песни' if text else 'Текста нет')
+            self.lyrics_button.setToolTip('Текст от зрителя' if text else 'Зритель указал, что текста нет')
+            self.lyrics_button.setEnabled(bool(text))
+            return
         if not title:
             self.lyrics_button.setText('Найти текст')
             self.lyrics_button.setEnabled(True)
@@ -976,6 +1003,10 @@ class Main(QMainWindow):
                     self.telegram_status.setToolTip(value)
                 if kind in ('telegram_status', 'telegram_refresh'):
                     self.refresh()
+        elif typ == 'private_bot':
+            bot, status = data
+            if bot is self.telegram_orders:
+                self.private_bot_status.setText(status)
         elif typ == 'callback':
             callback, value = data
             callback(value)
@@ -990,6 +1021,10 @@ class Main(QMainWindow):
             self.log.appendPlainText(str(data))
         elif typ == 'connection':
             self.status.setText(str(data))
+            self.telegram_reward_options = tuple(
+                (reward['id'], self.active_reward_limits[reward['id']], reward['title'])
+                for reward in self.available_rewards if reward['id'] in self.active_reward_limits
+            ) if str(data).startswith('Подключено') else ()
         elif typ == 'auth':
             self.log.appendPlainText(f"Открылся Twitch: код {data['code']}")
         elif typ == 'redemption':
@@ -1007,6 +1042,7 @@ class Main(QMainWindow):
         return client
 
     def connect_twitch(self):
+        self.telegram_reward_options = ()
         cid = self.cfg.get('client_id')
         if not cid:
             cid, ok = QInputDialog.getText(self, 'Twitch Client ID', 'Вставь Client ID приложения Twitch (без секрета):')
@@ -1090,6 +1126,7 @@ class Main(QMainWindow):
         selected = [r for r in self.available_rewards if r['id'] in limits]
         if not selected or not self.client:
             return
+        self.telegram_reward_options = ()
         self.reward = selected[0]
         self.active_reward_limits = dict(limits)
         self.cfg['reward_limits'] = dict(limits)
@@ -1120,6 +1157,19 @@ class Main(QMainWindow):
             return
         if not self.active_reward_limits and self.reward and reward_id != self.reward['id']:
             return
+        if self.telegram_orders and not self.telegram_orders.stop.is_set():
+            try:
+                code = telegram_request(event.get('user_input', ''))
+                if code:
+                    if self.telegram_orders.accept_reward(event, code):
+                        self.log.appendPlainText('MP3 из Telegram добавлен по награде Twitch.')
+                        self.refresh()
+                    return
+                if code == '':
+                    raise ValueError('Вставь в награду код MP3 из бота.')
+            except ValueError as exc:
+                self.log.appendPlainText('Заявка Telegram отклонена: ' + str(exc))
+                return
         if TELEGRAM_PAUSED and telegram_delivery_note(event.get('user_input', '')):
             self.log.appendPlainText(f"Заявка от {event.get('user_name', 'зритель')}: пропущена — трек в Telegram.")
             return
@@ -1426,6 +1476,58 @@ class Main(QMainWindow):
         elif self.telegram and self.telegram.bot_id:
             self.telegram_inbox.match_pending(self.telegram.chat_id, self.telegram.bot_id)
 
+    def configure_private_bot(self):
+        if self.telegram_orders and self.telegram_orders.thread.is_alive():
+            QMessageBox.information(self, 'Telegram', 'Сначала отключи текущего бота и дождись остановки.')
+            return
+        if not self.cfg.get('client_id'):
+            QMessageBox.information(self, 'Telegram', 'Сначала подключи Twitch через публичный Client ID.')
+            return
+        token, ok = QInputDialog.getText(self, 'Telegram MP3', 'Вставь токен отдельного бота от @BotFather:',
+                                         QLineEdit.Password)
+        if not ok or not token.strip():
+            return
+        try:
+            self.start_private_bot(token)
+        except (TelegramError, OSError) as exc:
+            QMessageBox.warning(self, 'Telegram', str(exc))
+            return
+        try:
+            keyring.set_password('TwitchTune.TelegramMP3', 'bot', token.strip())
+        except Exception:
+            self.log.appendPlainText('Токен бота не сохранился. Подключение работает до закрытия TwitchTune.')
+            return
+        self.cfg['telegram_mp3_enabled'] = True
+        save_config(APP, self.cfg)
+
+    def start_private_bot(self, token):
+        bot = TelegramOrders(token, self.cfg['client_id'], self.telegram_inbox, APP / 'tracks',
+                             lambda status: self.incoming.emit('private_bot', (bot, status)),
+                             lambda: self.telegram_reward_options)
+        self.telegram_orders = bot
+        self.telegram_clients.append(bot)
+        self.private_bot_status.setText('Подключение бота…')
+        bot.start()
+
+    def start_private_bot_if_ready(self):
+        if not self.cfg.get('telegram_mp3_enabled') or not self.cfg.get('client_id'):
+            return
+        try:
+            token = keyring.get_password('TwitchTune.TelegramMP3', 'bot')
+            if token:
+                self.start_private_bot(token)
+                return
+        except Exception:
+            pass
+        self.private_bot_status.setText('Подключи бота заново в настройках.')
+
+    def stop_private_bot(self):
+        if self.telegram_orders:
+            self.telegram_orders.close()
+        self.cfg['telegram_mp3_enabled'] = False
+        save_config(APP, self.cfg)
+        self.private_bot_status.setText('Бот отключён')
+
     def build_telegram_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -1652,7 +1754,8 @@ class Main(QMainWindow):
         self.rating_target.setToolTip(title)
         value = details(row) if row else None
         self.restore_rating_draft((value['scores'] if value else {},
-                                   value['text_enabled'] if value else True, row['comment'] if row else ''))
+                                   value['text_enabled'] if value else not row or row.get('submitted_lyrics') != '',
+                                   row['comment'] if row else ''))
 
     def save_rating(self):
         row = self.selected()

@@ -82,7 +82,7 @@ class QueueStore:
                                  'duration': 'REAL DEFAULT 0', 'max_duration': f'INTEGER DEFAULT {MAX_TRACK_SECONDS}',
                                  'reward_title': "TEXT DEFAULT ''", 'cover_url': "TEXT DEFAULT ''",
                                  'cover_path': "TEXT DEFAULT ''", 'description_lyrics': "TEXT DEFAULT ''",
-                                 'description_checked': 'INTEGER DEFAULT 0', 'soundcloud_description': "TEXT DEFAULT ''", 'vip_priority': 'INTEGER DEFAULT 0',
+                                 'submitted_lyrics': 'TEXT', 'description_checked': 'INTEGER DEFAULT 0', 'soundcloud_description': "TEXT DEFAULT ''", 'vip_priority': 'INTEGER DEFAULT 0',
                                  'donation_priority': 'INTEGER DEFAULT 0', 'donation_provider': "TEXT DEFAULT ''",
                                  'donation_amount': "TEXT DEFAULT ''", 'donation_currency': "TEXT DEFAULT ''",
                                  'donation_time': 'REAL DEFAULT 0'}.items():
@@ -133,6 +133,10 @@ class QueueStore:
             raise ValueError('Неверный идентификатор импортированного MP3.')
         return self._add('', 'MP3', viewer, local=metadata)
 
+    def add_telegram_mp3(self, order, viewer, redemption, max_duration, reward_title):
+        return self._add('', 'Telegram', viewer, redemption, order['twitch'],
+                         max_duration, reward_title, order['code'], local=order)
+
     def _add(self, url, source, viewer='Вручную', redemption=None, viewer_id=None,
              max_duration=MAX_TRACK_SECONDS, reward_title='', tg_code=None, local=None, donation=None):
         if type(max_duration) is not int or not 1 <= max_duration <= MAX_TRACK_SECONDS:
@@ -181,6 +185,10 @@ class QueueStore:
                 self.db.execute('UPDATE queue SET title=?, artist=?, track=?, duration=?, path=?, cover_path=?, status=? WHERE id=?',
                     (local['title'], local.get('artist', ''), local.get('track', ''), local['duration'],
                      local['path'], local.get('cover_path', ''), 'Готово', ident))
+            if local and source == 'Telegram':
+                self.db.execute('UPDATE queue SET submitted_lyrics=? WHERE id=?', (local['lyrics'], ident))
+                self.db.execute(
+                    "UPDATE tg_mp3_orders SET state='accepted', lyrics=NULL WHERE id=?", (ident,))
             if priority:
                 self.db.execute('UPDATE viewers SET vip_used=vip_used+1 WHERE viewer_key=?',(key,))
                 self.db.execute('UPDATE queue SET vip_priority=1 WHERE id=?',(ident,))
