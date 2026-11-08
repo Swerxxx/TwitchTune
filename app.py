@@ -20,14 +20,14 @@ from album_covers import load_album_cover
 from donation_settings import DonationSettings
 from binary_update_settings import BinaryUpdateSettings
 from core import QueueStore, load_config, save_config, telegram_request, telegram_delivery_note, parse_link
-from media import Downloader, search, load_saved_cover, soundcloud_lyrics
+from media import Downloader, search, load_saved_cover
 from twitch import TwitchClient
 from theme import INTERFACE_STYLES, THEMES, normalize_interface_style, normalize_theme, stylesheet
 from visuals import Chassis, DeckDisplay, ElideLabel, TransportButton, QueueDelegate, ThemeCard
 from telegram_support import TelegramClient, TelegramError, TelegramInbox
 from telegram_orders import TelegramOrders
 from lyrics import LyricsClient, song_query
-from lyrics_window import LyricsDialog
+from lyrics_window import LyricsDialog, SoundCloudDescriptionDialog
 from lyrics_resolver import LyricsResolver
 from source_metadata import yandex_metadata, replacement_query
 from track_files import remove_track_files, track_folder
@@ -204,6 +204,7 @@ class Main(QMainWindow):
         self.lyrics_generation = 0
         self.lyrics_candidates = None
         self.lyrics_window = None
+        self.description_window = None
         self.reward = None
         self.available_rewards = []
         self.active_reward_limits = {}
@@ -835,7 +836,19 @@ class Main(QMainWindow):
         self.lyrics_button.setFixedHeight(24)
         self.lyrics_button.setEnabled(False)
         self.lyrics_button.clicked.connect(self.show_lyrics)
-        metadata.addWidget(self.lyrics_button, 0, Qt.AlignLeft)
+        text_actions = QHBoxLayout()
+        text_actions.setSpacing(4)
+        text_actions.addWidget(self.lyrics_button)
+        self.description_button = QPushButton('SoundCloud')
+        self.description_button.setObjectName('lyricsButton')
+        self.description_button.setFixedHeight(24)
+        self.description_button.setToolTip('Открыть описание трека из SoundCloud')
+        self.description_button.setAccessibleName('Описание SoundCloud')
+        self.description_button.clicked.connect(lambda: self.show_soundcloud_description())
+        self.description_button.hide()
+        text_actions.addWidget(self.description_button)
+        text_actions.addStretch()
+        metadata.addLayout(text_actions)
         track.addLayout(metadata, 1)
         dock.addWidget(left)
         middle = QWidget()
@@ -915,6 +928,7 @@ class Main(QMainWindow):
         generation = self.lyrics_generation
         self.lyrics_candidates = None
         artist, title = song_query(row)
+        self.description_button.setVisible(row.get('source') == 'SoundCloud')
         self.lyrics_button.setText('Ищем текст…')
         self.lyrics_button.setEnabled(False)
         if row.get('submitted_lyrics') is not None:
@@ -943,9 +957,6 @@ class Main(QMainWindow):
                 self.lyrics_button.setEnabled(True)
                 self.lyrics_button.setToolTip(str(error))
         def lookup():
-            local = soundcloud_lyrics(self.store, row, cancelled=lambda: not active())
-            if local:
-                return [local]
             return self.lyrics_resolver.search(artist, title, row.get('duration', 0), row=row, cancelled=lambda: not active())
         self.run_async(lookup, found, failed)
 
@@ -964,6 +975,23 @@ class Main(QMainWindow):
         self.lyrics_window = window
         window.finished.connect(lambda *_: self.forget_lyrics_window(window))
         window.show()
+
+    def show_soundcloud_description(self, row=None):
+        if row is None and self.current:
+            row = self.store.get(self.playing_track_id())
+        if not row or row.get('source') != 'SoundCloud':
+            return
+        if self.description_window:
+            if self.description_window.row['id'] == row['id']:
+                self.description_window.showNormal()
+                self.description_window.raise_()
+                self.description_window.activateWindow()
+                return
+            self.description_window.reject()
+        dialog = SoundCloudDescriptionDialog(row, self)
+        self.description_window = dialog
+        dialog.finished.connect(lambda: setattr(self, 'description_window', None))
+        dialog.show()
 
     def show_cover(self, row):
         path = row.get('cover_path', '') if row else ''
@@ -2102,6 +2130,7 @@ class Main(QMainWindow):
         self.lyrics_candidates = None
         self.lyrics_button.setText('Текст песни')
         self.lyrics_button.setEnabled(False)
+        self.description_button.hide()
         self.player.stop()
         self.player.setSource(QUrl())
         self.now_title.setText('Ничего не играет')

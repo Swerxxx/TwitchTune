@@ -38,7 +38,7 @@ class LyricsDialog(QDialog):
         toolbar.addWidget(self.refine)
         self.description_button=QPushButton('Описание SoundCloud')
         self.description_button.setVisible(row.get('source')=='SoundCloud')
-        self.description_button.clicked.connect(self.show_soundcloud_description)
+        self.description_button.clicked.connect(lambda: self.owner.show_soundcloud_description(self.row))
         toolbar.addWidget(self.description_button)
         toolbar.addStretch()
         self.font_size = 15
@@ -135,24 +135,6 @@ class LyricsDialog(QDialog):
             lambda rows: self.show_results(rows) if not self.closed and generation == self.generation else None,
             lambda error: self.show_error(error) if not self.closed and generation == self.generation else None)
 
-    def show_soundcloud_description(self):
-        from media import soundcloud_lyrics
-        self.generation+=1;generation=self.generation
-        self.description_button.setEnabled(False);self.info.setText('Получаем полное описание SoundCloud…')
-        def cancelled():return self.closed or self.owner.closing or self.generation!=generation
-        def done(record):
-            if self.closed:return
-            self.description_button.setEnabled(True)
-            if cancelled():return
-            if record:self.show_results([record])
-            else:self.info.setText('Описание пустое или SoundCloud не ответил. Попробуй ещё раз позже.')
-        def failed(_error):
-            if self.closed:return
-            self.description_button.setEnabled(True)
-            if not cancelled():self.info.setText('Не удалось получить описание SoundCloud. Попробуй ещё раз позже.')
-        row=self.owner.store.get(self.row['id']) or self.row
-        self.owner.run_async(lambda:soundcloud_lyrics(self.owner.store,row,cancelled=cancelled,force=True,full=True),done,failed)
-
     def show_error(self, error):
         if self.closed:
             return
@@ -210,3 +192,63 @@ class LyricsDialog(QDialog):
         else:
             self.info.setText('Для этой версии текст не найден.')
             self.body.clear()
+
+class SoundCloudDescriptionDialog(QDialog):
+    def __init__(self, row, parent):
+        super().__init__(parent)
+        self.row, self.owner = row, parent
+        self.closed = False
+        self.setWindowTitle('Описание SoundCloud · ' + row['title'])
+        self.resize(620, 580)
+        layout = QVBoxLayout(self)
+        title = QLabel(row['title'])
+        title.setTextFormat(Qt.PlainText)
+        title.setWordWrap(True)
+        title.setObjectName('lyricsTitle')
+        layout.addWidget(title)
+        self.info = QLabel('Описание SoundCloud')
+        self.info.setWordWrap(True)
+        layout.addWidget(self.info)
+        self.body = QTextEdit()
+        self.body.setObjectName('lyricsBody')
+        self.body.setReadOnly(True)
+        self.body.setAcceptRichText(False)
+        layout.addWidget(self.body, 1)
+        self.refresh_button = QPushButton('Обновить описание')
+        self.refresh_button.clicked.connect(self.load_description)
+        layout.addWidget(self.refresh_button)
+        self.finished.connect(self.finish_reader)
+        current = parent.store.get(row['id']) or row
+        if current.get('soundcloud_description'):
+            self.body.setPlainText(current['soundcloud_description'])
+        else:
+            self.load_description()
+
+    def finish_reader(self):
+        self.closed = True
+        self.deleteLater()
+
+    def load_description(self):
+        from media import soundcloud_lyrics
+
+        row = self.owner.store.get(self.row['id']) or self.row
+        self.refresh_button.setEnabled(False)
+        self.info.setText('Получаем описание SoundCloud…')
+
+        def cancelled():
+            return self.closed or self.owner.closing
+
+        def done(record):
+            if cancelled():
+                return
+            self.refresh_button.setEnabled(True)
+            if record:
+                self.body.setPlainText(record['plainLyrics'])
+                self.info.setText('Описание SoundCloud')
+            else:
+                self.info.setText('Описание пустое или SoundCloud не ответил. Попробуй ещё раз.')
+
+        self.owner.run_async(
+            lambda: soundcloud_lyrics(self.owner.store, row, cancelled=cancelled, force=True, full=True),
+            done, lambda _: done(None),
+        )

@@ -842,20 +842,20 @@ class AppTests(unittest.TestCase):
         dialog.reject()
         self.assertIsNone(self.window.lyrics_window)
 
-    def test_soundcloud_description_is_used_before_lrclib_and_shows_its_source(self):
-        ident=self.window.store.add('https://soundcloud.com/artist/track','Viewer')
-        text='Первая собственная тестовая строка\nВторая собственная тестовая строка'
-        self.window.store.update(ident,title='SoundCloud Song',description_lyrics=text,description_checked=1)
-        self.window.current=ident
-        def run(fn,done,failed=None):
-            done(fn())
-        with patch.object(self.window.lyrics_client,'search') as external, patch.object(self.window,'run_async',side_effect=run):
+    def test_soundcloud_lyrics_search_ignores_saved_description(self):
+        ident = self.window.store.add('https://soundcloud.com/artist/track', 'Viewer')
+        self.window.store.update(ident, title='Artist — Song', description_checked=2,
+                                 description_lyrics='Строка из описания', soundcloud_description='Описание трека')
+        self.window.current = ident
+        record = dict(artistName='Artist', trackName='Song', plainLyrics='Найденный текст', source='LRCLIB')
+        with patch.object(self.window.lyrics_client, 'search', return_value=[record]) as external, \
+                patch.object(self.window, 'run_async', side_effect=lambda fn, done, failed=None: done(fn())):
             self.window.start_lyrics_lookup(self.window.store.get(ident))
-            external.assert_not_called()
+            external.assert_called_once()
         self.window.show_lyrics()
-        dialog=self.window.lyrics_window
-        self.assertEqual(dialog.body.toPlainText(),text)
-        self.assertIn('SoundCloud',dialog.source_label.text())
+        dialog = self.window.lyrics_window
+        self.assertEqual(dialog.body.toPlainText(), 'Найденный текст')
+        self.assertIn('LRCLIB', dialog.source_label.text())
         dialog.reject()
 
     def test_lyrics_refresh_failure_keeps_previous_text_visible(self):
@@ -884,22 +884,31 @@ class AppTests(unittest.TestCase):
         external.assert_called_once()
         self.assertEqual(external.call_args.args[:2],('Artist','Song'))
 
-    def test_full_soundcloud_description_is_shown_and_can_be_refreshed_without_audio_download(self):
-        ident=self.window.store.add('https://soundcloud.com/artist/track','Viewer')
-        raw='Короткий текст\nhttps://example.org\n@artist'
-        self.window.store.update(ident,title='Artist — Song',description_checked=2,soundcloud_description=raw)
-        self.window.current=ident
-        with patch.object(self.window.lyrics_client,'search') as external,patch.object(self.window,'run_async',side_effect=lambda fn,done,failed=None:done(fn())):
-            self.window.start_lyrics_lookup(self.window.store.get(ident));external.assert_not_called()
-            self.window.show_lyrics();dialog=self.window.lyrics_window
-            self.assertEqual(dialog.body.toPlainText(),raw)
-            self.assertIn('полное описание',dialog.source_label.text())
-            with patch('media.extract_soundcloud',return_value={'description':'Обновлённый текст\nhttps://example.org/new'}) as extract:
-                dialog.description_button.click()
+    def test_soundcloud_description_opens_separately_and_refreshes_without_audio_download(self):
+        ident = self.window.store.add('https://soundcloud.com/artist/track', 'Viewer')
+        raw = 'Короткий текст\nhttps://example.org\n@artist'
+        self.window.store.update(ident, title='Artist — Song', description_checked=2, soundcloud_description=raw)
+        self.window.current = ident
+        record = dict(artistName='Artist', trackName='Song', plainLyrics='Текст песни', source='LRCLIB')
+        with patch.object(self.window.lyrics_client, 'search', return_value=[record]), \
+                patch.object(self.window, 'run_async', side_effect=lambda fn, done, failed=None: done(fn())):
+            self.window.start_lyrics_lookup(self.window.store.get(ident))
+            self.assertFalse(self.window.description_button.isHidden())
+            self.window.description_button.click()
+            description = self.window.description_window
+            self.assertEqual(description.body.toPlainText(), raw)
+            self.window.show_lyrics()
+            lyrics = self.window.lyrics_window
+            lyrics.description_button.click()
+            self.assertIs(self.window.description_window, description)
+            with patch('media.extract_soundcloud', return_value={'description': 'Обновлённое описание'}) as extract:
+                description.refresh_button.click()
                 self.assertFalse(extract.call_args.kwargs['download'])
-                self.assertIn('Обновлённый текст',dialog.body.toPlainText())
-                self.assertIn('Обновлённый текст',self.window.store.get(ident)['soundcloud_description'])
-            dialog.reject()
+                self.assertEqual(description.body.toPlainText(), 'Обновлённое описание')
+            self.assertEqual(lyrics.body.toPlainText(), 'Текст песни')
+            description.reject()
+            lyrics.reject()
+            self.assertIsNone(self.window.description_window)
 
     def test_lyrics_fallback_is_connected_to_main_and_reader_with_source_label(self):
         from lyrics import LyricsError
