@@ -27,6 +27,7 @@ COMMANDS = (
     ('cancel', 'Отменить подготовку MP3'),
     ('unlink', 'Отвязать или сменить Twitch'),
     ('help', 'Все команды и инструкция'),
+    ('streamer', 'Статус стримера и приём MP3'),
 )
 
 
@@ -39,13 +40,14 @@ def eligible_rewards(rewards, duration):
 
 
 class TelegramOrders(TelegramClient):
-    def __init__(self, token, client_id, inbox, folder, emit, rewards):
+    def __init__(self, token, client_id, inbox, folder, emit, rewards, streamer_id=lambda: None):
         super().__init__(token, '', inbox, folder, emit)
         if not re.fullmatch(r'[a-zA-Z0-9]+', client_id):
             raise TelegramError('Укажи Client ID публичного приложения Twitch.')
         self.client_id = client_id
         self.store = inbox.store
         self.rewards = rewards
+        self.streamer_id = streamer_id
         self.bot_id = self.token.split(':', 1)[0]
         self.logins = {}
         self.unlink_requests = {}
@@ -58,6 +60,11 @@ class TelegramOrders(TelegramClient):
                 CREATE TABLE IF NOT EXISTS tg_viewer_accounts (
                     bot TEXT, telegram TEXT, twitch TEXT, login TEXT,
                     PRIMARY KEY (bot, telegram), UNIQUE (bot, twitch)
+                );
+                CREATE TABLE IF NOT EXISTS tg_streamer_delivery (
+                    id TEXT PRIMARY KEY, bot TEXT, file_id TEXT, method TEXT,
+                    sender TEXT, title TEXT, created REAL, delivered INTEGER DEFAULT 0,
+                    retry_after REAL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS tg_mp3_orders (
                     id TEXT PRIMARY KEY, code TEXT UNIQUE, bot TEXT, telegram TEXT,
@@ -95,6 +102,7 @@ class TelegramOrders(TelegramClient):
                 self.emit(status)
                 while not self.stop.is_set():
                     self.expire_orders()
+                    self.deliver_streamer_files()
                     while not self.notices.empty():
                         try:
                             chat, text = self.notices.get_nowait()
@@ -118,11 +126,20 @@ class TelegramOrders(TelegramClient):
 
     def apply_appearance(self):
         with self.store.lock:
-            if self.store.db.execute('SELECT 1 FROM tg_bot_appearance WHERE bot=?', (self.bot_id,)).fetchone():
+            if self.store.db.execute('SELECT 1 FROM tg_bot_appearance WHERE bot=?', (self.bot_id + ':streamer',)).fetchone():
                 return
         self.api('setMyCommands', commands=[
             {'command': name, 'description': description} for name, description in COMMANDS
         ])
+        with self.store.lock:
+            previously_branded = self.store.db.execute(
+                'SELECT 1 FROM tg_bot_appearance WHERE bot=?', (self.bot_id,)).fetchone()
+        if not previously_branded:
+            self.upload_appearance()
+        with self.store.lock, self.store.db:
+            self.store.db.execute('INSERT OR IGNORE INTO tg_bot_appearance VALUES (?)', (self.bot_id + ':streamer',))
+
+    def upload_appearance(self):
         self.api('setMyDescription', description=(
             '🎧 TwitchTune · музыкальные заявки\n\nВойди через Twitch, пришли MP3 и текст. '
             'Бот подскажет награду и выдаст код для заказа. Оценки и статистика доступны в профиле.'
@@ -147,15 +164,13 @@ class TelegramOrders(TelegramClient):
             uploaded = False
         if not uploaded:
             raise TelegramError('Telegram не принял аватар TwitchTune.')
-        with self.store.lock, self.store.db:
-            self.store.db.execute('INSERT OR IGNORE INTO tg_bot_appearance VALUES (?)', (self.bot_id,))
 
     def send_menu(self, chat):
         account = self.account(chat)
         if not account:
             return self.begin_login(chat)
         self.send(chat, f'<b>🎧 TWITCHTUNE</b>\n\nTwitch подключён · <b>{escape(account["login"])}</b>\n'
-                  'Пришли MP3, чтобы подготовить заявку на стрим.', [
+                  'Пришли MP3, чтобы подготовить заявку. Файл получит стример.', [
                       [{'text': '👤 Мой профиль', 'callback_data': 'profile'},
                        {'text': '🎵 Моя заявка', 'callback_data': 'pending'}],
                       [{'text': '📖 Команды и помощь', 'callback_data': 'help'}],
@@ -205,6 +220,45 @@ class TelegramOrders(TelegramClient):
         self.send(chat, '<b>Twitch отвязан.</b>\nЧтобы снова отправлять треки, привяжи нужный аккаунт.', [
             [{'text': 'Войти через Twitch', 'callback_data': 'menu'}],
         ], html=True)
+
+    def is_streamer(self, account):
+        owner = self.streamer_id()
+        return bool(owner and account and account['twitch'] == str(owner))
+
+    def send_streamer_status(self, chat, account):
+        if self.is_streamer(account):
+            self.send(chat, '🎙 Статус: стример. Сюда будут приходить MP3, которые зрители отправляют боту.')
+        else:
+            self.send(chat, 'Статус стримера доступен Twitch-аккаунту канала, подключённого в TwitchTune.')
+
+    def deliver_streamer_files(self):
+        owner = self.streamer_id()
+        if not owner:
+            return
+        with self.store.lock:
+            recipient = self.store.db.execute(
+                'SELECT telegram FROM tg_viewer_accounts WHERE bot=? AND twitch=?',
+                (self.bot_id, str(owner))).fetchone()
+            if not recipient:
+                return
+            files = self.store.db.execute(
+                'SELECT * FROM tg_streamer_delivery WHERE bot=? AND delivered=0 AND retry_after<=? ORDER BY created LIMIT 10',
+                (self.bot_id, time.time())).fetchall()
+        for file in files:
+            if self.stop.is_set() or str(self.streamer_id()) != str(owner):
+                return
+            kind = file['method']
+            caption = f"🎵 {file['title']}\nОт Twitch: {file['sender']}"
+            try:
+                self.api('sendAudio' if kind == 'audio' else 'sendDocument',
+                         chat_id=recipient['telegram'], caption=caption, **{kind: file['file_id']})
+            except TelegramError:
+                with self.store.lock, self.store.db:
+                    self.store.db.execute('UPDATE tg_streamer_delivery SET retry_after=? WHERE id=?',
+                                          (time.time() + 60, file['id']))
+                return
+            with self.store.lock, self.store.db:
+                self.store.db.execute('UPDATE tg_streamer_delivery SET delivered=1 WHERE id=?', (file['id'],))
 
     def account(self, chat):
         with self.store.lock:
@@ -341,6 +395,7 @@ class TelegramOrders(TelegramClient):
             for row in expired:
                 (self.folder / (row['id'] + '.mp3')).unlink(missing_ok=True)
             self.store.db.execute('DELETE FROM tg_mp3_orders WHERE created<=?', (cutoff,))
+            self.store.db.execute('DELETE FROM tg_streamer_delivery WHERE created<=?', (cutoff,))
 
     def stage(self, chat, account, media):
         with self.store.lock:
@@ -401,6 +456,11 @@ class TelegramOrders(TelegramClient):
                     """INSERT INTO tg_mp3_orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'pending')""",
                     (ident, code, self.bot_id, chat, account['twitch'], media['message_id'],
                      media['title'], artist, track, duration, time.time()))
+                self.store.db.execute(
+                    'INSERT INTO tg_streamer_delivery (id, bot, file_id, method, sender, title, created) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (ident, self.bot_id, media['file_id'], media.get('kind', 'audio'),
+                     account['login'], media['title'], time.time()))
             saved = True
         finally:
             partial.unlink(missing_ok=True)
@@ -485,6 +545,8 @@ class TelegramOrders(TelegramClient):
                 return self.send_menu(chat)
             if command == '/profile':
                 return self.send_profile(chat)
+            if command == '/streamer':
+                return self.send_streamer_status(chat, account)
             if command == '/unlink':
                 return self.ask_unlink(chat)
             if command == '/pending':
@@ -495,7 +557,7 @@ class TelegramOrders(TelegramClient):
             if media:
                 if media['date'] <= time.time() - MAX_AGE:
                     return
-                return self.stage(chat, account, media)
+                return self.stage(chat, account, dict(media, kind='audio' if message.get('audio') else 'document'))
             order = self.pending(chat)
             if text and not command and order and order['lyrics'] is None:
                 return self.save_lyrics(chat, order, text)

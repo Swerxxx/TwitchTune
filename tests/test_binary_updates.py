@@ -129,7 +129,7 @@ class BinaryUpdateSettingsTests(unittest.TestCase):
         cls.application=QApplication.instance() or QApplication([])
 
     def owner(self):
-        owner=SimpleNamespace(cfg={},closing=False,current=None,smoke_test=True,close=Mock(),incoming=Mock())
+        owner=SimpleNamespace(cfg={},closing=False,current=None,smoke_test=True,exit_application=Mock(),incoming=Mock())
         def run(fn,done,failed):
             try:result=fn()
             except Exception as error:failed(str(error))
@@ -151,7 +151,7 @@ class BinaryUpdateSettingsTests(unittest.TestCase):
             with patch('binary_update_settings.read_manifest',side_effect=UpdateError('Сервер обновлений недоступен.')):panel.check()
             self.assertEqual(panel.status.text(),'Сервер обновлений недоступен.')
             self.assertFalse(panel.install_button.isEnabled());self.assertFalse(panel.busy)
-            owner.close.assert_not_called();panel.close()
+            owner.exit_application.assert_not_called();panel.close()
 
     def test_failed_helper_handoff_keeps_application_open_and_removes_staging(self):
         from binary_update_settings import BinaryUpdateSettings
@@ -160,7 +160,7 @@ class BinaryUpdateSettingsTests(unittest.TestCase):
             owner=self.owner();panel=BinaryUpdateSettings(owner,root/'profile');panel.frozen=True;panel.manifest=manifest()
             with patch('binary_update_settings.download_package',return_value=root/'package.zip'),patch('binary_update_settings.stage_package',return_value=stage),patch('binary_update_settings.launch_installer',side_effect=UpdateError('Не удалось запустить установку.')):
                 panel.install()
-            owner.close.assert_not_called();self.assertFalse(stage.exists());self.assertFalse(panel.busy)
+            owner.exit_application.assert_not_called();self.assertFalse(stage.exists());self.assertFalse(panel.busy)
             self.assertEqual(panel.status.text(),'Не удалось запустить установку.');panel.close()
 
     def test_successful_helper_handoff_closes_application_after_preparation(self):
@@ -170,4 +170,4 @@ class BinaryUpdateSettingsTests(unittest.TestCase):
             owner=self.owner();panel=BinaryUpdateSettings(owner,root/'profile');panel.frozen=True;panel.manifest=manifest()
             with patch('binary_update_settings.download_package',return_value=root/'package.zip'),patch('binary_update_settings.stage_package',return_value=stage),patch('binary_update_settings.launch_installer') as launch:
                 panel.install()
-            launch.assert_called_once();owner.close.assert_called_once();self.assertTrue(stage.exists());panel.close()
+            launch.assert_called_once();owner.exit_application.assert_called_once();self.assertTrue(stage.exists());panel.close()

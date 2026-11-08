@@ -6,11 +6,11 @@ import traceback
 import keyring
 from pathlib import Path
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtCore import QObject, QUrl, Signal, Slot, QThread, QTimer, Qt
+from PySide6.QtCore import QObject, QUrl, Signal, Slot, QThread, QTimer, Qt, QSettings
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QComboBox,
     QDialog, QDialogButtonBox, QPlainTextEdit, QGroupBox, QInputDialog, QSlider,
-    QSpinBox, QTabWidget, QSplitter, QCheckBox, QFormLayout, QFrame, QGridLayout, QSizePolicy, QScrollArea, QFileDialog)
+    QSpinBox, QTabWidget, QSplitter, QCheckBox, QFormLayout, QFrame, QGridLayout, QSizePolicy, QScrollArea, QFileDialog, QSystemTrayIcon, QMenu)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QAudioBufferOutput
 from audio_visualizer import AudioWaves
 from local_audio import import_mp3
@@ -32,6 +32,7 @@ from lyrics_resolver import LyricsResolver
 from source_metadata import yandex_metadata, replacement_query
 from track_files import remove_track_files, track_folder
 from reward_settings import RewardDialog, guess_limit, limit_text
+from settings_wheel import SettingsWheelGuard
 from yandex_direct import check_session
 from vk_settings import VKSettings
 
@@ -210,6 +211,8 @@ class Main(QMainWindow):
         self.displayed_cover = None
         self.jobs = []
         self.closing = False
+        self.exit_requested = False
+        self.background_tray = None
         self.telegram = None
         self.telegram_orders = None
         self.telegram_reward_options = ()
@@ -223,6 +226,7 @@ class Main(QMainWindow):
         self.player.mediaStatusChanged.connect(self.media_status)
         self.player.errorOccurred.connect(lambda *_: self.log.appendPlainText('Плеер: ' + self.player.errorString()))
         self.build()
+        self.setup_background_tray()
         self.audio_buffers = QAudioBufferOutput(self)
         self.player.setAudioBufferOutput(self.audio_buffers)
         self.audio_buffers.audioBufferReceived.connect(self.audio_waves.receive_buffer)
@@ -357,7 +361,9 @@ class Main(QMainWindow):
         center.addLayout(heading)
         reward_line = QHBoxLayout()
         reward_line.addWidget(self.label('НАГРАДА', 'micro'))
+        self.settings_wheel_guard = SettingsWheelGuard(self)
         self.rewards = QComboBox()
+        self.settings_wheel_guard.protect(self.rewards)
         self.rewards.setPlaceholderText('Выбери награду после подключения Twitch')
         self.rewards.setEnabled(False)
         self.rewards.activated.connect(self.choose_reward)
@@ -582,6 +588,16 @@ class Main(QMainWindow):
         self.button('Подключить бота', self.configure_private_bot, actions)
         self.button('Отключить', self.stop_private_bot, actions)
         bot_layout.addLayout(actions)
+        background = QCheckBox('Оставлять TwitchTune и бота в трее при закрытии окна')
+        background.setChecked(bool(self.cfg.get('telegram_keep_running')))
+        background.setEnabled(QSystemTrayIcon.isSystemTrayAvailable())
+        background.toggled.connect(self.save_background_mode)
+        bot_layout.addWidget(background)
+        if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+            autostart = QCheckBox('Запускать в трее при входе в Windows')
+            autostart.setChecked(self.windows_startup().contains('TwitchTune'))
+            autostart.toggled.connect(self.set_windows_startup)
+            bot_layout.addWidget(autostart)
         content.addWidget(bot_box)
         self.donation_settings=DonationSettings(self,APP)
         content.addWidget(self.donation_settings)
@@ -613,6 +629,7 @@ class Main(QMainWindow):
         content.addWidget(self.palette_options)
         content.addStretch()
         scroll.setWidget(body)
+        self.settings_wheel_guard.protect_children(body)
         layout.addWidget(scroll)
         self.tabs.addTab(page, 'Настройки')
 
@@ -1065,6 +1082,12 @@ class Main(QMainWindow):
         self.log.appendPlainText(error)
 
     def after_login(self, info):
+        if info.get('user_id'):
+            self.cfg['telegram_streamer_twitch_id'] = str(info['user_id'])
+            try:
+                save_config(APP, self.cfg)
+            except OSError:
+                self.log.appendPlainText('Не удалось сохранить аккаунт получателя MP3.')
         self.status.setText(f"Вошёл как {info.get('login')}")
         self.login.setText('Переподключить Twitch')
         self.run_async(self.client.rewards, self.show_rewards, self.rewards_failed)
@@ -1476,6 +1499,57 @@ class Main(QMainWindow):
         elif self.telegram and self.telegram.bot_id:
             self.telegram_inbox.match_pending(self.telegram.chat_id, self.telegram.bot_id)
 
+    def setup_background_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        tray = QSystemTrayIcon(self.windowIcon(), self)
+        tray.setToolTip('TwitchTune')
+        menu = QMenu(self)
+        menu.addAction('Открыть TwitchTune', self.restore_from_tray)
+        menu.addAction('Выход и остановка бота', self.exit_application)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self.tray_activated)
+        self.background_tray = tray
+
+    def tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.restore_from_tray()
+
+    def restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def save_background_mode(self, enabled):
+        self.cfg['telegram_keep_running'] = enabled
+        save_config(APP, self.cfg)
+
+    @staticmethod
+    def windows_startup():
+        return QSettings(r'HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run',
+                         QSettings.Format.NativeFormat)
+
+    def set_windows_startup(self, enabled):
+        startup = self.windows_startup()
+        if enabled:
+            startup.setValue('TwitchTune', f'"{sys.executable}" --start-in-tray')
+        else:
+            startup.remove('TwitchTune')
+        startup.sync()
+        if startup.status() != QSettings.Status.NoError:
+            QMessageBox.warning(self, 'Автозапуск', 'Windows не сохранила настройку автозапуска.')
+
+    def start_hidden(self):
+        if self.background_tray is None:
+            self.show()
+        else:
+            self.background_tray.show()
+            self.hide()
+
+    def exit_application(self):
+        self.exit_requested = True
+        self.close()
+
     def configure_private_bot(self):
         if self.telegram_orders and self.telegram_orders.thread.is_alive():
             QMessageBox.information(self, 'Telegram', 'Сначала отключи текущего бота и дождись остановки.')
@@ -1503,7 +1577,8 @@ class Main(QMainWindow):
     def start_private_bot(self, token):
         bot = TelegramOrders(token, self.cfg['client_id'], self.telegram_inbox, APP / 'tracks',
                              lambda status: self.incoming.emit('private_bot', (bot, status)),
-                             lambda: self.telegram_reward_options)
+                             lambda: self.telegram_reward_options,
+                             lambda: self.cfg.get('telegram_streamer_twitch_id'))
         self.telegram_orders = bot
         self.telegram_clients.append(bot)
         self.private_bot_status.setText('Подключение бота…')
@@ -2118,6 +2193,11 @@ class Main(QMainWindow):
         self.log.appendPlainText('Ошибка: ' + error)
 
     def closeEvent(self, event):
+        if (not self.exit_requested and not self.closing and not self.smoke_test
+                and self.background_tray is not None and self.cfg.get('telegram_keep_running')):
+            event.ignore()
+            self.start_hidden()
+            return
         if not self.closing:
             self.closing = True
             if self.client:
@@ -2133,11 +2213,18 @@ class Main(QMainWindow):
             self.setEnabled(False)
             QTimer.singleShot(200, self.close)
             return
+        if self.background_tray is not None:
+            self.background_tray.hide()
         super().closeEvent(event)
+        if self.exit_requested and not self.isVisible():
+            QApplication.quit()
 
 
 if __name__ == '__main__':
     try:
+        start_in_tray = '--start-in-tray' in sys.argv
+        if start_in_tray:
+            sys.argv.remove('--start-in-tray')
         smoke_test='--smoke-test' in sys.argv
         if smoke_test:sys.argv.remove('--smoke-test')
         health_file=None
@@ -2161,7 +2248,10 @@ if __name__ == '__main__':
             QMessageBox.information(None,'TwitchTune','TwitchTune уже запущен или сейчас обновляется. Открой существующее окно.')
             sys.exit(0)
         window = Main(smoke_test=smoke_test)
-        window.show()
+        if start_in_tray and not smoke_test:
+            window.start_hidden()
+        else:
+            window.show()
         if health_file:
             from binary_updates import write_health_marker
             from release_version import VERSION

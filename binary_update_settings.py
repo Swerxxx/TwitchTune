@@ -85,7 +85,8 @@ class BinaryUpdateSettings(QGroupBox):
             except Exception:shutil.rmtree(stage,ignore_errors=True);raise
         def done(stage):
             if self.owner.closing:return
-            self.status.setText('Завершаем работу для установки обновления…');self.owner.close()
+            self.status.setText('Завершаем работу для установки обновления…')
+            self.owner.exit_application()
         def failed(error):
             if self.owner.closing:return
             if (job/'installer.log').is_file():(job/'package.zip').unlink(missing_ok=True)

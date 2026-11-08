@@ -1,6 +1,7 @@
 """Music reward cards and second-accurate, independently persisted limits."""
 import re
 from limits import MAX_TRACK_SECONDS
+from settings_wheel import SettingsWheelGuard
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QWidget, QCheckBox, QSpinBox, QDialogButtonBox, QFrame)
@@ -29,6 +30,7 @@ class DurationControl(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        self.wheel_guard = SettingsWheelGuard(self)
         self.minutes = DurationDigits()
         self.minutes.setRange(0, 90)
         self.seconds = DurationDigits()
@@ -37,7 +39,8 @@ class DurationControl(QWidget):
             column = QVBoxLayout()
             column.setSpacing(3)
             field.setObjectName('durationDigits')
-            field.setToolTip('Введи число или используй клавиши ↑ / ↓ и колесо мыши.')
+            self.wheel_guard.protect(field)
+            field.setToolTip('Введи число или используй клавиши ↑ / ↓.')
             field.setAlignment(Qt.AlignCenter)
             field.setFixedWidth(82)
             field.setAccessibleName(f'{reward_title}: {"минуты" if caption == "мин" else "секунды"}')

@@ -141,4 +141,22 @@ class TelegramOrderTests(unittest.TestCase):
         self.assertTrue(post.call_args.kwargs['files']['avatar'][1].startswith(b'\xff\xd8'))
         commands = self.bot.api.call_args_list[0].kwargs['commands']
         self.assertEqual([row['command'] for row in commands],
-                         ['start', 'profile', 'pending', 'cancel', 'unlink', 'help'])
+                         ['start', 'profile', 'pending', 'cancel', 'unlink', 'help', 'streamer'])
+
+    def test_only_channel_owner_gets_validated_mp3_and_delivery_is_not_repeated(self):
+        self.authorize()
+        self.bot.streamer_id = lambda: '7'
+        self.upload()
+        self.bot.api.reset_mock()
+        self.bot.deliver_streamer_files()
+        self.bot.api.assert_not_called()
+        with self.store.lock, self.store.db:
+            self.store.db.execute("INSERT INTO tg_viewer_accounts VALUES ('12345', '100', '7', 'owner')")
+        self.bot.deliver_streamer_files()
+        self.bot.api.assert_called_once()
+        self.assertEqual(self.bot.api.call_args.args, ('sendAudio',))
+        self.assertEqual(self.bot.api.call_args.kwargs['chat_id'], '100')
+        self.assertEqual(self.bot.api.call_args.kwargs['audio'], 'file')
+        self.bot.deliver_streamer_files()
+        self.assertEqual(self.bot.api.call_count, 1)
+        self.assertEqual(self.store.rows(), [])
