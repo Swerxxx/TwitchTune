@@ -7,9 +7,13 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QScrollArea, QWidget, QCheckBox, QSpinBox, QDialogButtonBox, QFrame)
 
 
-def guess_limit(title):
+def title_limit(title):
     match = re.search(r'\b(\d{1,2})\s*(?:мин(?:ут[аыу]?)?|minutes?|min)\b', title, re.I)
-    return int(match[1])*60 if match and 1 <= int(match[1]) <= 90 else MAX_TRACK_SECONDS
+    return int(match[1]) * 60 if match and 1 <= int(match[1]) <= 90 else None
+
+
+def guess_limit(title):
+    return title_limit(title) or MAX_TRACK_SECONDS
 
 
 def limit_text(seconds):
@@ -171,7 +175,7 @@ class RewardDialog(QDialog):
         scroll.setWidget(body)
         layout.addWidget(scroll, 1)
         footer = QHBoxLayout()
-        note = QLabel('Лимит: от 0:01 до 15:00')
+        note = QLabel('Лимит: от 0:01 до 90:00')
         note.setObjectName('micro')
         footer.addWidget(note)
         footer.addStretch()

@@ -31,7 +31,7 @@ from lyrics_window import LyricsDialog, SoundCloudDescriptionDialog
 from lyrics_resolver import LyricsResolver
 from source_metadata import yandex_metadata, replacement_query
 from track_files import remove_track_files, track_folder
-from reward_settings import RewardDialog, guess_limit, limit_text
+from reward_settings import RewardDialog, guess_limit, limit_text, title_limit
 from settings_wheel import SettingsWheelGuard
 from yandex_direct import check_session
 from vk_settings import VKSettings
@@ -208,6 +208,13 @@ class Main(QMainWindow):
         self.reward = None
         self.available_rewards = []
         self.active_reward_limits = {}
+        self.reward_catalog_loaded = False
+        self.reward_refresh_busy = False
+        self.reward_subscription = None
+        self.twitch_rewards_connected = False
+        self.reward_refresh_timer = QTimer(self)
+        self.reward_refresh_timer.setInterval(30_000)
+        self.reward_refresh_timer.timeout.connect(self.refresh_reward_catalog)
         self.cover_attempts = set()
         self.displayed_cover = None
         self.jobs = []
@@ -371,6 +378,9 @@ class Main(QMainWindow):
         reward_line.addWidget(self.rewards, 1)
         self.reward_settings_button = self.button('Награды', self.configure_rewards, reward_line)
         self.reward_settings_button.setEnabled(False)
+        self.reward_refresh_button = self.button('Обновить', lambda: self.refresh_reward_catalog(manual=True), reward_line)
+        self.reward_refresh_button.setToolTip('Загрузить награды Twitch и применить длительность, указанную в их названиях')
+        self.reward_refresh_button.setEnabled(False)
         center.addLayout(reward_line)
         self.tabs = QTabWidget()
         self.tabs.setObjectName('pages')
@@ -1066,10 +1076,8 @@ class Main(QMainWindow):
             self.log.appendPlainText(str(data))
         elif typ == 'connection':
             self.status.setText(str(data))
-            self.telegram_reward_options = tuple(
-                (reward['id'], self.active_reward_limits[reward['id']], reward['title'])
-                for reward in self.available_rewards if reward['id'] in self.active_reward_limits
-            ) if str(data).startswith('Подключено') else ()
+            self.twitch_rewards_connected = str(data).startswith('Подключено')
+            self.update_telegram_reward_options()
         elif typ == 'auth':
             self.log.appendPlainText(f"Открылся Twitch: код {data['code']}")
         elif typ == 'redemption':
@@ -1087,7 +1095,6 @@ class Main(QMainWindow):
         return client
 
     def connect_twitch(self):
-        self.telegram_reward_options = ()
         cid = self.cfg.get('client_id')
         if not cid:
             cid, ok = QInputDialog.getText(self, 'Twitch Client ID', 'Вставь Client ID приложения Twitch (без секрета):')
@@ -1095,6 +1102,13 @@ class Main(QMainWindow):
                 return
             self.cfg['client_id'] = cid.strip()
             save_config(APP, self.cfg)
+        self.reward_refresh_timer.stop()
+        self.reward_refresh_button.setEnabled(False)
+        self.reward_refresh_busy = False
+        self.twitch_rewards_connected = False
+        self.telegram_reward_options = ()
+        self.reward_subscription = None
+        self.reward_catalog_loaded = False
         if self.client:
             self.client.close()
         self.client = self.make_client(self.cfg['client_id'])
@@ -1118,39 +1132,80 @@ class Main(QMainWindow):
                 self.log.appendPlainText('Не удалось сохранить аккаунт получателя MP3.')
         self.status.setText(f"Вошёл как {info.get('login')}")
         self.login.setText('Переподключить Twitch')
-        self.run_async(self.client.rewards, self.show_rewards, self.rewards_failed)
+        self.reward_refresh_timer.start()
+        self.refresh_reward_catalog()
 
-    def rewards_failed(self, error):
-        self.login.setEnabled(True)
-        self.async_error(error)
+    def refresh_reward_catalog(self, manual=False):
+        client = self.client
+        if not client or self.closing or self.reward_refresh_busy:
+            return
+        self.reward_refresh_busy = True
+        self.reward_refresh_button.setEnabled(False)
 
-    def show_rewards(self, rewards):
+        def finish():
+            if self.client is not client:
+                return False
+            self.reward_refresh_busy = False
+            self.reward_refresh_button.setEnabled(True)
+            self.login.setEnabled(True)
+            return not self.closing
+
+        def done(rewards):
+            if finish():
+                self.sync_reward_catalog(rewards, manual)
+                if manual:
+                    self.log.appendPlainText('Награды Twitch обновлены.')
+
+        def failed(error):
+            if finish() and (manual or not self.reward_catalog_loaded):
+                self.async_error(error)
+
+        self.run_async(client.rewards, done, failed)
+
+    def sync_reward_catalog(self, rewards, manual=False):
+        saved = dict(self.cfg.get('reward_limits') or {})
+        previous = self.cfg.get('reward_title_limits') or {}
+        inferred = {}
+        for reward in rewards:
+            ident = reward['id']
+            limit = title_limit(reward['title'])
+            if limit is not None:
+                inferred[ident] = limit
+                if ident in saved and (manual or (ident in previous and previous[ident] != limit)):
+                    saved[ident] = limit
+        if saved != self.cfg.get('reward_limits', {}) or inferred != previous:
+            self.cfg['reward_limits'] = saved
+            self.cfg['reward_title_limits'] = inferred
+            save_config(APP, self.cfg)
+        if self.reward_catalog_loaded and not manual and rewards == self.last_reward_catalog and saved == self.last_reward_limits:
+            return
+        self.last_reward_catalog, self.last_reward_limits = rewards, saved
+        self.show_rewards(rewards, keep_selection=bool(saved))
+
+    def show_rewards(self, rewards, keep_selection=False):
         self.login.setEnabled(True)
+        self.reward_catalog_loaded = True
         self.available_rewards = [r for r in rewards if r.get('is_enabled') and r.get('is_user_input_required')]
         self.reward_settings_button.setEnabled(bool(self.available_rewards))
-        self.rewards.clear()
-        for reward in self.available_rewards:
-            self.rewards.addItem(reward['title'], reward)
-        if not self.rewards.count():
-            self.log.appendPlainText('Создай награду с обязательным текстовым полем, затем переподключи Twitch.')
-            return
         saved = self.cfg.get('reward_limits', {})
         selected = {r['id']: saved[r['id']] for r in self.available_rewards
                     if isinstance(saved, dict) and type(saved.get(r['id'])) is int and 1 <= saved[r['id']] <= MAX_TRACK_SECONDS}
+        self.rewards.clear()
         if len(selected) > 1:
-            self.rewards.insertItem(0, f'Принимаются награды: {len(selected)}', None)
+            self.rewards.addItem(f'Принимаются награды: {len(selected)}', None)
+        for reward in self.available_rewards:
+            self.rewards.addItem(reward['title'], reward)
+        self.rewards.setEnabled(bool(self.available_rewards))
+        if not selected and self.available_rewards and not keep_selection:
+            reward = next((r for r in self.available_rewards if r['id'] == self.cfg.get('reward_id')),
+                          self.available_rewards[0])
+            selected = {reward['id']: guess_limit(reward['title'])}
+        if len(selected) > 1:
             self.rewards.setCurrentIndex(0)
-            self.rewards.setEnabled(True)
-            self.activate_rewards(selected)
-            return
-        index = next((i for i in range(self.rewards.count())
-                      if self.rewards.itemData(i)['id'] in selected), -1)
-        if index < 0:
-            index = next((i for i in range(self.rewards.count())
-                      if self.rewards.itemData(i)['id'] == self.cfg.get('reward_id')), 0)
-        self.rewards.setCurrentIndex(index)
-        self.rewards.setEnabled(True)
-        self.choose_reward(index)
+        else:
+            self.rewards.setCurrentIndex(next((i for i in range(self.rewards.count())
+                if self.rewards.itemData(i)['id'] in selected), -1))
+        self.activate_rewards(selected, persist=not keep_selection)
 
     def choose_reward(self, index):
         reward = self.rewards.itemData(index)
@@ -1173,29 +1228,50 @@ class Main(QMainWindow):
             self.show_rewards(self.available_rewards)
         dialog.deleteLater()
 
-    def activate_rewards(self, limits):
-        selected = [r for r in self.available_rewards if r['id'] in limits]
-        if not selected or not self.client:
+    def update_telegram_reward_options(self):
+        self.telegram_reward_options = tuple(
+            (reward['id'], self.active_reward_limits[reward['id']], reward['title'])
+            for reward in self.available_rewards if reward['id'] in self.active_reward_limits
+        ) if self.twitch_rewards_connected else ()
+
+    def activate_rewards(self, limits, persist=True):
+        if not self.client:
             return
-        self.telegram_reward_options = ()
-        self.reward = selected[0]
+        selected = [r for r in self.available_rewards if r['id'] in limits]
+        self.reward = selected[0] if selected else None
         self.active_reward_limits = dict(limits)
-        self.cfg['reward_limits'] = dict(limits)
-        self.cfg['reward_id'] = selected[0]['id']
-        save_config(APP, self.cfg)
-        self.reward_settings_button.setText(f'Награды ({len(selected)})')
+        if persist and (limits != self.cfg.get('reward_limits') or
+                        (self.reward and self.cfg.get('reward_id') != self.reward['id'])):
+            self.cfg['reward_limits'] = dict(limits)
+            if self.reward:
+                self.cfg['reward_id'] = self.reward['id']
+            save_config(APP, self.cfg)
+        self.reward_settings_button.setText(f'Награды ({len(selected)})' if selected else 'Награды')
         description = '\n'.join(f"{r['title']} — до {limit_text(limits[r['id']])}" for r in selected)
-        self.rewards.setToolTip(description)
-        self.log.appendPlainText('Принимаются награды:\n' + description)
-        # Reuse authorization, but a separate client owns each socket lifecycle.
+        self.rewards.setToolTip(description or 'Нет доступных выбранных наград')
+        ids = [r['id'] for r in selected]
+        subscription = frozenset(ids)
+        if self.reward_subscription == subscription:
+            self.update_telegram_reward_options()
+            return
+        self.reward_subscription = subscription
+        self.twitch_rewards_connected = False
+        self.update_telegram_reward_options()
+        if not ids:
+            self.status.setText('Выбери доступную награду')
+        else:
+            self.log.appendPlainText('Принимаются награды:\n' + description)
         old = self.client
         old.close()
         client = self.make_client(old.client_id)
         client.tokens, client.user = old.tokens, old.user
         client.last_validate = old.last_validate
         self.client = client
-        ids = [r['id'] for r in selected]
-        client.connect(ids if len(ids) > 1 else ids[0])
+        if self.reward_refresh_busy:
+            self.reward_refresh_busy = False
+            self.reward_refresh_button.setEnabled(True)
+        if ids:
+            client.connect(ids if len(ids) > 1 else ids[0])
 
     def redeem(self, event):
         if str(event.get('status','')).lower() in ('canceled','cancelled'):
@@ -1204,7 +1280,7 @@ class Main(QMainWindow):
         # A late event from the previous socket cannot select a different reward.
         event_reward = event.get('reward', {})
         reward_id = event_reward.get('id')
-        if self.active_reward_limits and reward_id not in self.active_reward_limits:
+        if (self.reward_catalog_loaded or self.active_reward_limits) and reward_id not in self.active_reward_limits:
             return
         if not self.active_reward_limits and self.reward and reward_id != self.reward['id']:
             return
@@ -2229,6 +2305,7 @@ class Main(QMainWindow):
             return
         if not self.closing:
             self.closing = True
+            self.reward_refresh_timer.stop()
             if self.client:
                 self.client.close()
             for client in self.telegram_clients:

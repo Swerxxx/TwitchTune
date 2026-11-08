@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from threading import Event
 from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -611,6 +611,38 @@ class AppTests(unittest.TestCase):
         self.assertIn('2 мин 37 сек',self.window.rewards.toolTip())
         self.window.redeem(dict(id='exact-limit',user_name='Viewer',user_id='42',user_input='https://youtu.be/test',reward={'id':'music'}))
         self.assertEqual(self.window.store.rows()[0]['max_duration'],157)
+
+    def test_refresh_applies_renamed_reward_limit_without_reconnecting(self):
+        self.window.client = self.window.make_client('id')
+        reward = dict(id='music', title='Трек до 5 минут', is_enabled=True, is_user_input_required=True)
+        self.window.sync_reward_catalog([reward])
+        socket_client = self.window.client
+        self.window.handle_event('connection', 'Подключено · заявки принимаются')
+        updated = dict(reward, title='Трек до 15 минут')
+        socket_client.rewards = Mock(return_value=[updated])
+        with patch.object(self.window, 'run_async', side_effect=lambda fn, done, failed: done(fn())):
+            self.window.reward_refresh_timer.timeout.emit()
+        self.assertIs(self.window.client, socket_client)
+        self.assertEqual(self.window.rewards.currentText(), updated['title'])
+        self.assertEqual(self.window.telegram_reward_options, (('music', 900, updated['title']),))
+        self.window.redeem(dict(id='after-refresh', user_name='Viewer', user_id='42',
+            user_input='https://youtu.be/test', reward={'id': 'music'}))
+        self.assertEqual(self.window.store.rows()[0]['max_duration'], 900)
+        self.assertEqual(module.load_config(module.APP)['reward_limits'], {'music': 900})
+
+    def test_manual_refresh_adopts_title_and_disabled_reward_is_not_accepted(self):
+        self.window.client = self.window.make_client('id')
+        self.window.cfg['reward_limits'] = {'music': 157}
+        reward = dict(id='music', title='Трек до 5 минут', is_enabled=True, is_user_input_required=True)
+        self.window.sync_reward_catalog([reward])
+        self.assertEqual(self.window.active_reward_limits, {'music': 157})
+        self.window.sync_reward_catalog([reward], manual=True)
+        self.assertEqual(self.window.active_reward_limits, {'music': 300})
+        self.window.sync_reward_catalog([dict(reward, is_enabled=False)])
+        self.window.redeem(dict(id='disabled', user_input='https://youtu.be/test', reward={'id': 'music'}))
+        self.assertEqual(self.window.store.rows(), [])
+        self.window.sync_reward_catalog([reward])
+        self.assertEqual(self.window.active_reward_limits, {'music': 300})
 
     def test_worker_callbacks_run_on_gui_thread(self):
         results = []
