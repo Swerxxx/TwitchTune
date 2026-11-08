@@ -198,6 +198,14 @@ class TelegramTests(unittest.TestCase):
                 self.client.api('getMe')
         self.assertNotIn('SECRET', str(error.exception))
 
+    def test_bot_start_retries_network_timeout_and_reports_non_json_response(self):
+        response = Mock(status_code=502)
+        response.json.side_effect = ValueError('Not JSON')
+        with patch('telegram_support.requests.post', side_effect=[requests.Timeout(), response]) as post:
+            with self.assertRaisesRegex(TelegramError, 'HTTP 502'):
+                self.client.api('getMe')
+            self.assertEqual(post.call_count, 2)
+
     def test_reply_only_once_and_failure_retains_file(self):
         self.client.api = Mock(return_value={})
         self.client.handle_message(message())

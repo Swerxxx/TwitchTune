@@ -186,12 +186,33 @@ class TelegramClient:
         self.thread = None
 
     def api(self, method, **params):
+        url = 'https://api.telegram.org/bot' + self.token + '/' + method
+        attempts = 2 if method in ('getMe', 'getWebhookInfo') else 1
+        for attempt in range(attempts):
+            try:
+                response = requests.post(url, json=params, timeout=(10, 25), allow_redirects=False)
+                break
+            except requests.exceptions.SSLError:
+                raise TelegramError('Telegram: ошибка TLS. Проверь дату Windows и сертификат сетевого прокси.') from None
+            except requests.exceptions.ProxyError:
+                raise TelegramError('Telegram: системный прокси не смог подключиться к api.telegram.org.') from None
+            except (requests.Timeout, requests.ConnectionError) as error:
+                if attempt + 1 == attempts or self.stop.is_set():
+                    reason = 'сервер не ответил вовремя' if isinstance(error, requests.Timeout) else 'не удалось установить соединение'
+                    raise TelegramError(f'Telegram: {reason}. Проверь доступ к api.telegram.org на этом ПК.') from None
+            except requests.RequestException:
+                raise TelegramError('Telegram: запрос не удалось отправить. Проверь настройки сети.') from None
         try:
-            response = requests.post('https://api.telegram.org/bot' + self.token + '/' + method,
-                                     json=params, timeout=(10, 25), allow_redirects=False)
             data = response.json()
-        except (requests.RequestException, ValueError):
-            raise TelegramError('Нет связи с Telegram. Проверь подключение.') from None
+        except ValueError:
+            data = None
+        if response.status_code == 401:
+            raise TelegramError('Telegram отклонил токен. Скопируй актуальный токен бота из @BotFather.')
+        if response.status_code == 409:
+            raise TelegramError('Telegram: бот уже запущен в другом экземпляре или подключён к webhook.')
+        if not isinstance(data, dict):
+            raise TelegramError(f'Telegram вернул неожиданный ответ (HTTP {response.status_code}). '
+                                'Проверь, не подменяет ли прокси или сеть ответ api.telegram.org.')
         if not response.ok or not data.get('ok'):
             # Never expose request URLs (they contain the token).
             detail = str(data.get('description', 'Ошибка API')).replace(self.token, '[скрыто]')[:200]

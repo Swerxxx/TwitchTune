@@ -1,7 +1,10 @@
 import queue
+import re
 import threading
 from pathlib import Path
+from urllib.parse import quote_plus
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError, ExtractorError
 from yandex_direct import extract_direct, validate_full_track, YandexAccessError
 from track_files import remove_track_files, downloaded_audio_path, track_folder
 from spotify_support import spotify_metadata, choose_spotify_version, SpotifyError
@@ -50,16 +53,42 @@ def search(query):
         raise ValueError('Введи исполнителя и название песни.')
     if 'http://' in query.lower() or 'https://' in query.lower():
         raise ValueError('Для поиска нужны исполнитель и название, а не ссылка на сервис.')
+    query = query.strip()
     opts = options()
-    opts.update(extract_flat='in_playlist', skip_download=True)
-    with YoutubeDL(opts) as ydl:
-        data = ydl.extract_info('ytsearch10:'+query.strip(), download=False)
-    if not isinstance(data, dict):
-        raise ValueError('YouTube не вернул результаты. Попробуй позже или вставь прямую ссылку.')
-    return [dict(title=x.get('title', 'Без названия'),
-                 url='https://www.youtube.com/watch?v='+x['id'],
-                 duration=x.get('duration'), channel=x.get('channel') or x.get('uploader') or '')
-            for x in data.get('entries', []) if x and x.get('id') and not metadata_filter(x)]
+    opts.update(extract_flat='in_playlist', skip_download=True, playlistend=10, extractor_retries=1)
+    searches = ('ytsearch10:' + query,
+                'https://music.youtube.com/search?q=' + quote_plus(query) + '#videos')
+    completed = False
+    last_error = None
+    for target in searches:
+        try:
+            with YoutubeDL(opts) as ydl:
+                data = ydl.extract_info(target, download=False)
+                if not isinstance(data, dict) or data.get('entries') is None:
+                    continue
+                results = [
+                    dict(title=entry.get('title') or 'Без названия',
+                         url='https://www.youtube.com/watch?v=' + entry['id'],
+                         duration=entry.get('duration'),
+                         channel=entry.get('channel') or entry.get('uploader') or '')
+                    for entry in data['entries']
+                    if isinstance(entry, dict)
+                    and re.fullmatch(r'[A-Za-z0-9_-]{11}', str(entry.get('id') or ''))
+                    and not metadata_filter(entry)
+                ]
+        except (DownloadError, ExtractorError, OSError) as error:
+            last_error = error
+            continue
+        completed = True
+        if results:
+            return results
+    if completed:
+        return []
+    if last_error and youtube_connection_error(last_error):
+        raise ValueError('YouTube оборвал соединение при поиске. Проверь доступ к YouTube на этом ПК и попробуй ещё раз.')
+    if last_error:
+        raise ValueError(str(last_error)) from None
+    raise ValueError('YouTube и YouTube Music не вернули результаты. Попробуй позже или вставь прямую ссылку.')
 
 
 def load_saved_cover(store, folder, row, cancelled=lambda: False):

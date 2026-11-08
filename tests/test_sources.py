@@ -135,14 +135,32 @@ class SourceTests(unittest.TestCase):
         ydl.__enter__ = Mock(return_value=ydl)
         ydl.__exit__ = Mock(return_value=False)
         ydl.extract_info.return_value = {'entries': [
-            dict(id='good', title='Song', duration=200, channel='Artist'),
-            dict(id='long', title='Mix', duration=5401),
-            dict(id='live', title='Stream', is_live=True)]}
+            dict(id='good1234567', title='Song', duration=200, channel='Artist'),
+            dict(id='long1234567', title='Mix', duration=5401),
+            dict(id='live1234567', title='Stream', is_live=True)]}
         with patch('media.YoutubeDL', return_value=ydl):
             rows = search('Artist Song')
-        self.assertEqual([row['url'] for row in rows], ['https://www.youtube.com/watch?v=good'])
+        self.assertEqual([row['url'] for row in rows], ['https://www.youtube.com/watch?v=good1234567'])
         self.assertNotIn('nocheckcertificate', options())
         self.assertIn('no-certifi', options()['compat_opts'])
+
+class YouTubeReplacementSearchTests(unittest.TestCase):
+    def test_video_search_uses_youtube_music_when_youtube_connection_fails(self):
+        from media import search
+        from yt_dlp.utils import DownloadError
+
+        with patch('media.YoutubeDL') as downloader:
+            extract = downloader.return_value.__enter__.return_value.extract_info
+            extract.side_effect = [
+                DownloadError('Connection reset'),
+                {'entries': [{'id': 'abcdefghijk', 'title': 'Song', 'duration': 180},
+                             {'id': 'album-not-video', 'title': 'Album'}]},
+            ]
+            results = search('Artist & Song')
+        self.assertEqual(results[0]['url'], 'https://www.youtube.com/watch?v=abcdefghijk')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(extract.call_args.args[0], 'https://music.youtube.com/search?q=Artist+%26+Song#videos')
+        self.assertFalse(extract.call_args.kwargs['download'])
 
 
 if __name__ == '__main__': unittest.main()
