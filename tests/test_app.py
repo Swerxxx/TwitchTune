@@ -781,6 +781,39 @@ class AppTests(unittest.TestCase):
             self.assertEqual(self.window.play.ink('#c6f52b').name(), theme['accent'])
             self.assertEqual(sum(button.isChecked() for button in self.window.theme_buttons.values()), 1)
 
+    def test_biohazard_all_palettes_preserve_playback_and_restore_style(self):
+        from theme import THEMES, bio_image
+        from PySide6.QtGui import QPixmap
+        ident = self.ready()
+        self.window.play_row(self.window.store.get(ident))
+        self.window.interface_style_picker.setCurrentIndex(
+            self.window.interface_style_picker.findData('biohazard'))
+        self.window.show()
+        for key, theme in THEMES.items():
+            self.window.apply_theme(key)
+            self.application.processEvents()
+            self.assertEqual(self.window.play.ink('#c6f52b').name(), theme['accent'])
+            self.assertEqual(self.window.current, ident)
+            self.assertEqual(self.window.player.playbackState(), QMediaPlayer.PlayingState)
+            self.assertFalse(self.window.palette_options.isHidden())
+            self.assertFalse(self.window.bio_speaker_left.isHidden())
+            self.assertFalse(self.window.grab().isNull())
+            for kind in ('panel', 'button'):
+                self.assertFalse(QPixmap(bio_image(kind, key)).isNull())
+        self.assertEqual(module.load_config(module.APP)['interface_style'], 'biohazard')
+        other = module.Main()
+        try:
+            self.assertEqual(other.interface_style, 'biohazard')
+            self.assertEqual(other.theme_key, key)
+        finally:
+            other.close()
+            other.store.db.close()
+            other.deleteLater()
+        self.window.interface_style_picker.setCurrentIndex(
+            self.window.interface_style_picker.findData('classic'))
+        self.assertTrue(self.window.bio_speaker_left.isHidden())
+        self.assertEqual(self.window.play.ink('#c6f52b').name(), THEMES[key]['accent'])
+
     def test_saved_theme_restores_and_does_not_change_other_windows(self):
         module.save_config(module.APP, {'theme': 'violet', 'volume': 44})
         other = module.Main()
@@ -1075,6 +1108,30 @@ class AppTests(unittest.TestCase):
             dialog.choose_manual()
         network.assert_not_called()
         self.assertEqual(dialog.choice['url'], 'https://youtu.be/example')
+
+    def test_spotify_replacement_resolves_source_url_and_searches_youtube(self):
+        url = 'https://open.spotify.com/track/68zS1pu1EGdiQQ5pZf4A00?si=example'
+        ident = self.window.store.add(url)
+        self.window.store.update(ident, status='Нужна замена')
+        self.window.refresh()
+        self.window.list.setCurrentRow(0)
+        metadata = dict(artist='Artist', track='Song', title='Artist — Song', duration=180)
+        result = dict(title='Artist — Song', url='https://youtu.be/abcdefghijk', duration=180, channel='Artist')
+
+        def inspect_dialog(dialog):
+            self.assertEqual(dialog.query.text(), 'Artist Song')
+            self.assertEqual(dialog.list.count(), 1)
+            return 0
+
+        with patch.object(module, 'spotify_metadata', return_value=metadata) as lookup, \
+                patch.object(module, 'search', return_value=[result]) as search, \
+                patch.object(self.window, 'run_async', side_effect=lambda fn, done, failed=None: done(fn())), \
+                patch.object(module.SearchDialog, 'exec', new=inspect_dialog):
+            self.window.find_version()
+        lookup.assert_called_once()
+        self.assertEqual(lookup.call_args.args[0].split('?')[0], url.split('?')[0])
+        search.assert_called_once_with('Artist Song')
+        self.assertEqual(self.window.store.get(ident)['title'], 'Artist — Song')
 
     def test_failed_metadata_lookup_does_not_search_for_the_source_url(self):
         calls = []

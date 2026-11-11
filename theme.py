@@ -102,7 +102,7 @@ def theme_color(value, key='green'):
     return '#' + ''.join(f'{round(channel*255):02x}' for channel in rgb)
 
 
-INTERFACE_STYLES = {'classic': 'Базовый', 'dark_goth': 'Dark Goth'}
+INTERFACE_STYLES = {'classic': 'Базовый', 'dark_goth': 'Dark Goth', 'biohazard': 'Biohazard PSP'}
 
 
 def normalize_interface_style(key):
@@ -117,6 +117,9 @@ def goth_button_image(active=False):
 def stylesheet(key='green', interface_style='classic'):
     palette = 'dark_goth' if interface_style == 'dark_goth' else key
     base = re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: theme_color(match.group(), palette), STYLE)
+    if interface_style == 'biohazard':
+        surfaces = BIO_SURFACES.replace('__PANEL__', bio_image('panel', key)).replace('__BUTTON__', bio_image('button', key))
+        return base + re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: theme_color(match.group(), key), surfaces)
     if interface_style != 'dark_goth':
         return base
     panel = (Path(__file__).resolve().parent / 'assets' / 'goth-panel.svg').as_posix()
@@ -265,3 +268,39 @@ QSpinBox#criterionScore::up-button:hover, QSpinBox#criterionScore::down-button:h
 QSpinBox#criterionScore::up-arrow { image: url("__REWARD_UP__"); width: 8px; height: 5px; }
 QSpinBox#criterionScore::down-arrow { image: url("__REWARD_DOWN__"); width: 8px; height: 5px; }
 '''.replace('__REWARD_UP__', (Path(__file__).resolve().parent / 'assets' / 'step-up.svg').as_posix()).replace('__REWARD_DOWN__', (Path(__file__).resolve().parent / 'assets' / 'step-down.svg').as_posix())
+
+
+def bio_image(kind, key='green'):
+    return (Path(__file__).resolve().parent / 'assets' / f'bio-{kind}-{normalize_theme(key)}.svg').as_posix()
+
+
+BIO_SURFACES = """
+QMainWindow, QDialog { background: #090b09; }
+QFrame#metal, QFrame#dock, QGroupBox, QFrame#lyricsPaper, QFrame#rewardCard {
+    background: transparent; border: 12px solid transparent; border-radius: 0;
+    border-image: url("__PANEL__") 18 18 18 18 stretch stretch;
+}
+QGroupBox { padding: 8px 2px 2px; }
+QGroupBox::title { color: #c6f52b; background: #090b09; font: bold 9pt "Consolas"; }
+QPushButton, QPushButton#primary, QPushButton#nav, QPushButton#score, QPushButton#lyricsButton {
+    background: transparent; border: 8px solid transparent; border-radius: 0;
+    border-image: url("__BUTTON__") 18 18 18 18 stretch stretch;
+    padding: 2px 6px; color: #d8ddcb;
+}
+QPushButton#nav { text-align: left; padding: 6px; }
+QPushButton#score, QPushButton#lyricsButton { border-width: 6px; padding: 1px 4px; }
+QPushButton#primary, QPushButton#nav:checked, QPushButton#score:checked,
+QPushButton:hover, QPushButton#nav:hover, QPushButton#score:hover, QPushButton#lyricsButton:hover {
+    color: #c6f52b; font-weight: bold;
+}
+QPushButton:pressed, QPushButton#primary:pressed { color: #e7ffb3; padding-top: 3px; padding-bottom: 1px; }
+QPushButton:disabled, QPushButton#primary:disabled, QPushButton#nav:disabled,
+QPushButton#score:disabled, QPushButton#lyricsButton:disabled { color: #626b52; }
+QLabel#brand { font: bold 25pt "Bahnschrift"; color: #e4e9d5; }
+QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {
+    background: #080c05; border: 1px solid #56623d; border-radius: 3px;
+}
+QTabBar::tab { border-radius: 2px; }
+QSlider::groove:horizontal { height: 6px; background: #080c05; border: 1px solid #454d36; }
+QSlider::handle:horizontal { width: 12px; border-radius: 2px; background: #414735; border: 1px solid #c6f52b; }
+"""

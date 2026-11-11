@@ -23,13 +23,14 @@ from core import QueueStore, load_config, save_config, telegram_request, telegra
 from media import Downloader, search, load_saved_cover
 from twitch import TwitchClient
 from theme import INTERFACE_STYLES, THEMES, normalize_interface_style, normalize_theme, stylesheet
-from visuals import Chassis, DeckDisplay, ElideLabel, TransportButton, QueueDelegate, ThemeCard
+from visuals import HardwareSpeaker, Chassis, DeckDisplay, ElideLabel, TransportButton, QueueDelegate, ThemeCard
 from telegram_support import TelegramClient, TelegramError, TelegramInbox
 from telegram_orders import TelegramOrders
 from lyrics import LyricsClient, song_query
 from lyrics_window import LyricsDialog, SoundCloudDescriptionDialog
 from lyrics_resolver import LyricsResolver
 from source_metadata import yandex_metadata, replacement_query
+from spotify_support import spotify_metadata
 from track_files import remove_track_files, track_folder
 from reward_settings import RewardDialog, guess_limit, limit_text, title_limit
 from settings_wheel import SettingsWheelGuard
@@ -278,6 +279,8 @@ class Main(QMainWindow):
         main.setSpacing(12)
 
         header = QHBoxLayout()
+        self.bio_speaker_left = HardwareSpeaker()
+        header.addWidget(self.bio_speaker_left)
         mark = self.label('TT', 'brandMark')
         mark.setAlignment(Qt.AlignCenter)
         mark.setFixedSize(48, 48)
@@ -296,6 +299,8 @@ class Main(QMainWindow):
         self.status.setMaximumWidth(240)
         header.addWidget(self.status)
         self.login = self.button('Подключить Twitch', self.connect_twitch, header)
+        self.bio_speaker_right = HardwareSpeaker()
+        header.addWidget(self.bio_speaker_right)
         main.addLayout(header)
 
         request = self.panel()
@@ -760,7 +765,9 @@ class Main(QMainWindow):
         self.theme_key = normalize_theme(key)
         self.setStyleSheet(stylesheet(self.theme_key, self.interface_style))
         goth = self.interface_style == 'dark_goth'
-        deck = 'DARK GOTH' if goth else 'ACID DECK'
+        for speaker in (self.bio_speaker_left, self.bio_speaker_right):
+            speaker.setVisible(self.interface_style == 'biohazard')
+        deck = {'dark_goth': 'DARK GOTH', 'biohazard': 'BIOHAZARD PSP'}.get(self.interface_style, 'ACID DECK')
         self.setWindowTitle(f'TwitchTune · {deck}')
         self.wordmark_subtitle.setText(f'{deck}  /  STREAM MUSIC SYSTEM')
         self.palette_options.setVisible(not goth)
@@ -2041,13 +2048,16 @@ class Main(QMainWindow):
             return
         if row['id'] == self.current or row['status'] == 'Загрузка':
             return
+        query = replacement_query(row)
+        metadata_loader = {'Spotify': spotify_metadata, 'Яндекс Музыка': yandex_metadata}.get(row['source'])
+
         def resolve():
-            metadata = yandex_metadata(row['url'])
+            metadata = metadata_loader(row['url'])
             self.store.update_download(row['id'], **metadata)
             self.incoming.emit('queue', None)
             return metadata
-        query = replacement_query(row)
-        resolver = resolve if not query and row['source'] == 'Яндекс Музыка' else None
+
+        resolver = resolve if not query and metadata_loader is not None else None
         dialog = SearchDialog(query, self, row['url'], resolver)
         if dialog.exec() and dialog.choice:
             self.store.update(row['id'], replacement=dialog.choice['url'], title=dialog.choice['title'],

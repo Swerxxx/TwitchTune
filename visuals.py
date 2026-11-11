@@ -3,11 +3,15 @@ from ratings import score_label
 import math
 from pathlib import Path
 from PySide6.QtCore import Qt, QRectF, QPointF, QSize, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen, QFont, QLinearGradient, QRadialGradient, QPolygonF, QPixmap, QPixmapCache
+from PySide6.QtGui import QColor, QPainter, QPen, QFont, QLinearGradient, QRadialGradient, QPolygonF, QPixmap, QPixmapCache, QPainterPath
 from PySide6.QtWidgets import QWidget, QPushButton, QLabel, QStyledItemDelegate, QStyle
 from theme import THEMES, goth_button_image, theme_color, normalize_theme
 
 class Themed:
+    def hardware_style(self):
+        widget = self if isinstance(self, QWidget) else self.parent()
+        return getattr(widget.window(), 'interface_style', 'classic') == 'biohazard'
+
     def theme_key(self):
         widget = self if isinstance(self, QWidget) else self.parent()
         window = widget.window()
@@ -43,6 +47,9 @@ class Chassis(Themed, QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.fillRect(self.rect(), self.ink('#090b09'))
         w, h = self.width(), self.height()
+        if self.hardware_style():
+            paint_bio_chassis(p, w, h, self.theme_key())
+            return
         if self.theme_key() == 'dark_goth':
             glow = QRadialGradient(w * .5, 0, max(w, h) * .75)
             glow.setColorAt(0, QColor('#30202f'))
@@ -122,6 +129,12 @@ class TransportButton(Themed, QPushButton):
             if self.hasFocus():
                 p.setPen(QPen(self.ink('#c6f52b'), 1, Qt.DotLine))
                 p.drawEllipse(r.adjusted(-1, -1, 1, 1))
+        if self.hardware_style():
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor('#94816a'), 1))
+            p.drawEllipse(r.adjusted(2, 2, -2, -2))
+            p.setPen(QPen(QColor('#090b09'), 2))
+            p.drawEllipse(r.adjusted(4, 4, -4, -4))
         p.setPen(Qt.NoPen)
         p.setBrush(self.ink('#c6f52b'))
         cx, cy = self.width()/2, self.height()/2 + (1 if self.isDown() else 0)
@@ -307,3 +320,66 @@ class ThemeCard(QPushButton):
         p.drawEllipse(QPointF(self.width()-30, 74), 6, 6)
         p.setPen(ink('#879477')); p.setFont(QFont('Consolas', 7))
         p.drawText(15, 105, 'ВЫБРАНА' if self.isChecked() else 'НАЖМИ ДЛЯ ВЫБОРА')
+
+
+def paint_bio_chassis(p, w, h, key):
+    """Deterministic metal wear and braided perimeter cables, no raster scaling."""
+    accent = QColor(theme_color('#c6f52b', key))
+    surface = QLinearGradient(0, 0, w, h)
+    surface.setColorAt(0, QColor('#2f2c29'))
+    surface.setColorAt(.35, QColor('#0a0c0c'))
+    surface.setColorAt(.8, QColor('#161817'))
+    surface.setColorAt(1, QColor('#514536'))
+    p.fillRect(QRectF(0, 0, w, h), surface)
+    for i in range(180):
+        x, y = (i * 137 + 17) % max(w, 1), (i * 71 + 9) % max(h, 1)
+        p.setPen(QPen(QColor(154, 139, 116, 24), .7))
+        p.drawLine(QPointF(x, y), QPointF(x + 9 + i % 13, y - 3))
+    for edge in (7, h - 8):
+        path = QPainterPath(QPointF(-10, edge))
+        path.cubicTo(w * .28, edge + 14, w * .65, edge - 13, w + 10, edge)
+        p.setPen(QPen(QColor('#050606'), 10)); p.drawPath(path)
+        p.setPen(QPen(QColor('#776551'), 6)); p.drawPath(path)
+        p.setPen(QPen(QColor('#292422'), 3)); p.drawPath(path)
+        color = QColor(accent); color.setAlpha(150)
+        p.setPen(QPen(color, 1)); p.drawPath(path)
+        p.setPen(QPen(QColor('#c0aa8a'), .7))
+        for x in range(10, w, 12):
+            p.drawLine(QPointF(x, edge - 3), QPointF(x + 4, edge + 3))
+    for x in (13, w - 14):
+        for y in (17, h - 18):
+            g = QRadialGradient(x, y, 12)
+            for stop, value in ((0, '#070808'), (.25, '#353833'), (.65, '#121513'), (.85, '#726858'), (1, '#070808')):
+                g.setColorAt(stop, QColor(value))
+            p.setBrush(g); p.setPen(QPen(QColor('#75634e'), 1))
+            p.drawEllipse(QPointF(x, y), 11, 11)
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(accent, .7))
+    p.drawRoundedRect(QRectF(24, 13, w - 48, h - 26), 18, 18)
+
+
+class HardwareSpeaker(Themed, QWidget):
+    """Decorative speaker; deliberately silent and independent of playback."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(64, 64)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAccessibleName('Декоративный динамик')
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QPointF(32, 32)
+        g = QRadialGradient(29, 27, 30)
+        for stop, color in ((0, '#090a09'), (.17, '#292e28'), (.23, '#030504'), (.30, '#31382d'), (.68, '#191e18'), (.76, '#3b4035'), (.81, '#090b09'), (.89, '#756b59'), (.94, '#252622'), (1, '#080a08')):
+            g.setColorAt(stop, QColor(color))
+        p.setBrush(g); p.setPen(QPen(QColor('#82715c'), 1))
+        p.drawEllipse(c, 30, 30)
+        p.setBrush(Qt.NoBrush)
+        color = self.ink('#c6f52b'); color.setAlpha(110)
+        p.setPen(QPen(color, 1)); p.drawEllipse(c, 26, 26)
+        p.setPen(QPen(QColor(130, 133, 120, 35), .7))
+        for i in range(12):
+            p.drawArc(QRectF(10+i, 10+i, 44-2*i, 44-2*i), 20*16, 180*16)
+        for x, y in ((12,12),(52,12),(12,52),(52,52)):
+            screw(p, x, y, self.theme_key())
