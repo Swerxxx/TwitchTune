@@ -30,7 +30,7 @@ from lyrics import LyricsClient, song_query
 from lyrics_window import LyricsDialog, SoundCloudDescriptionDialog
 from lyrics_resolver import LyricsResolver
 from source_metadata import yandex_metadata, replacement_query
-from spotify_support import spotify_metadata
+from spotify_support import spotify_search_metadata
 from track_files import remove_track_files, track_folder
 from reward_settings import RewardDialog, guess_limit, limit_text, title_limit
 from settings_wheel import SettingsWheelGuard
@@ -1241,12 +1241,18 @@ class Main(QMainWindow):
             for reward in self.available_rewards if reward['id'] in self.active_reward_limits
         ) if self.twitch_rewards_connected else ()
 
+    def sync_request_reward_limits(self):
+        return self.store.sync_reward_limits([
+            dict(id=r['id'], title=r['title'], limit=self.active_reward_limits[r['id']])
+            for r in self.available_rewards if r['id'] in self.active_reward_limits])
+
     def activate_rewards(self, limits, persist=True):
         if not self.client:
             return
         selected = [r for r in self.available_rewards if r['id'] in limits]
         self.reward = selected[0] if selected else None
         self.active_reward_limits = dict(limits)
+        self.sync_request_reward_limits()
         if persist and (limits != self.cfg.get('reward_limits') or
                         (self.reward and self.cfg.get('reward_id') != self.reward['id'])):
             self.cfg['reward_limits'] = dict(limits)
@@ -1310,13 +1316,13 @@ class Main(QMainWindow):
         if album_reference(event.get('user_input','')):
             self.import_album(event.get('user_input',''),dict(viewer=event.get('user_name','зритель'),
                 redemption=event.get('id'),viewer_id=event.get('user_id'),
-                max_duration=self.active_reward_limits.get(reward_id,MAX_TRACK_SECONDS),reward_title=event_reward.get('title','')))
+                max_duration=self.active_reward_limits.get(reward_id,MAX_TRACK_SECONDS),reward_title=event_reward.get('title',''),reward_id=reward_id))
             return
         try:
             ident = self.add_request(event.get('user_input', ''), event.get('user_name', 'зритель'),
                                    event.get('id'), viewer_id=event.get('user_id'),
                                    max_duration=self.active_reward_limits.get(reward_id, MAX_TRACK_SECONDS),
-                                   reward_title=event_reward.get('title', ''))
+                                   reward_title=event_reward.get('title', ''), reward_id=reward_id)
             if ident:
                 self.submit_request(ident)
                 self.log.appendPlainText(f"Заявка от {event.get('user_name')}: добавлена")
@@ -1388,6 +1394,8 @@ class Main(QMainWindow):
             release()
             if self.closing:return
             try:
+                if options.get('reward_id') in self.active_reward_limits:
+                    options['max_duration'] = self.active_reward_limits[options['reward_id']]
                 album,ids=create_album(self.store,APP/'Альбомы',metadata,viewer,**options)
                 if options.get('donation'):
                     parent=self.store.album_request(album) if album else None
@@ -1413,6 +1421,7 @@ class Main(QMainWindow):
         else:self.run_async(lambda:catalog(url,cancelled=lambda:self.closing,settings=dict(self.cfg)),done,failed)
 
     def retry_album(self, album):
+        self.sync_request_reward_limits()
         parent=self.store.album_request(album)
         if not parent:return
         for row in self.store.album_tracks(album):
@@ -1597,10 +1606,10 @@ class Main(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, 'История', str(exc))
 
-    def add_request(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title=''):
+    def add_request(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', reward_id=''):
         if TELEGRAM_PAUSED and telegram_request(text) is not None:
             raise ValueError('Приём из Telegram пока отложен. Укажи ссылку на трек.')
-        return self.store.add(text, viewer, redemption, viewer_id, max_duration=max_duration, reward_title=reward_title)
+        return self.store.add(text, viewer, redemption, viewer_id, max_duration=max_duration, reward_title=reward_title, reward_id=reward_id)
 
     def submit_request(self, ident):
         if self.store.get(ident)['source'] == 'MP3':
@@ -2049,7 +2058,7 @@ class Main(QMainWindow):
         if row['id'] == self.current or row['status'] == 'Загрузка':
             return
         query = replacement_query(row)
-        metadata_loader = {'Spotify': spotify_metadata, 'Яндекс Музыка': yandex_metadata}.get(row['source'])
+        metadata_loader = {'Spotify': spotify_search_metadata, 'Яндекс Музыка': yandex_metadata}.get(row['source'])
 
         def resolve():
             metadata = metadata_loader(row['url'])
@@ -2072,6 +2081,7 @@ class Main(QMainWindow):
             self.refresh()
 
     def retry_selected(self):
+        self.sync_request_reward_limits()
         row = self.queue_selected()
         if row and row['source']=='Альбом':
             self.retry_album(row['album_id'])

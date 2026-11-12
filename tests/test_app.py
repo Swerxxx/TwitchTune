@@ -630,6 +630,26 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.window.store.rows()[0]['max_duration'], 900)
         self.assertEqual(module.load_config(module.APP)['reward_limits'], {'music': 900})
 
+    def test_changed_reward_limit_reaches_existing_album_and_retry(self):
+        from test_albums import album_metadata
+        from media import metadata_filter
+        self.window.client=self.window.make_client('id')
+        reward=dict(id='album',title='Альбом',is_enabled=True,is_user_input_required=True)
+        self.window.cfg['reward_limits']={'album':900}
+        self.window.show_rewards([reward])
+        album, ids=self.window.store.add_album(album_metadata(),Path(self.folder.name)/'album',
+            redemption='old-redemption',max_duration=900,reward_title='Альбом',reward_id='album')
+        self.window.store.update(ids[0],duration=3600,status='Ошибка Яндекса',error='Лимит 15 минут')
+        self.window.cfg['reward_limits']={'album':5400}
+        self.window.show_rewards([reward])
+        self.window.retry_album(album)
+        self.assertEqual(self.window.store.album_request(album)['max_duration'],5400)
+        row=self.window.store.get(ids[0])
+        self.assertEqual(row['max_duration'],5400)
+        self.assertEqual(row['error'],'')
+        self.assertIn(ids[0],self.window.down.submitted)
+        self.assertIsNone(metadata_filter({'duration':3600},max_seconds=row['max_duration']))
+
     def test_manual_refresh_adopts_title_and_disabled_reward_is_not_accepted(self):
         self.window.client = self.window.make_client('id')
         self.window.cfg['reward_limits'] = {'music': 157}
@@ -1115,7 +1135,7 @@ class AppTests(unittest.TestCase):
         self.window.store.update(ident, status='Нужна замена')
         self.window.refresh()
         self.window.list.setCurrentRow(0)
-        metadata = dict(artist='Artist', track='Song', title='Artist — Song', duration=180)
+        metadata = dict(artist='Artist', track='Song', title='Artist — Song', duration=0)
         result = dict(title='Artist — Song', url='https://youtu.be/abcdefghijk', duration=180, channel='Artist')
 
         def inspect_dialog(dialog):
@@ -1123,7 +1143,7 @@ class AppTests(unittest.TestCase):
             self.assertEqual(dialog.list.count(), 1)
             return 0
 
-        with patch.object(module, 'spotify_metadata', return_value=metadata) as lookup, \
+        with patch.object(module, 'spotify_search_metadata', return_value=metadata) as lookup, \
                 patch.object(module, 'search', return_value=[result]) as search, \
                 patch.object(self.window, 'run_async', side_effect=lambda fn, done, failed=None: done(fn())), \
                 patch.object(module.SearchDialog, 'exec', new=inspect_dialog):

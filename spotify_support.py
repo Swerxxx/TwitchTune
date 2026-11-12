@@ -40,7 +40,7 @@ def spotify_reference(url):
     return ident, 'https://open.spotify.com/track/' + ident
 
 
-def parse_spotify_embed(html, ident):
+def parse_spotify_embed(html, ident, require_duration=True):
     parser = EmbedData()
     parser.feed(html)
     try:
@@ -53,7 +53,7 @@ def parse_spotify_embed(html, ident):
         if not isinstance(title, str) or not title.strip() or not names:
             raise ValueError('Missing title/artist')
         duration = float(entity.get('duration') or 0) / 1000
-        if not 0 < duration <= MAX_TRACK_SECONDS:
+        if not math.isfinite(duration) or duration < 0 or (require_duration and not 0 < duration <= MAX_TRACK_SECONDS):
             raise ValueError('Missing/unsupported duration')
         result = dict(title=', '.join(names)+' — '+title.strip(), artist=', '.join(names),
                       track=title.strip(), duration=duration)
@@ -78,6 +78,56 @@ def spotify_metadata(url):
     except requests.RequestException:
         raise SpotifyError('Не удалось получить данные Spotify. Проверь доступ к open.spotify.com и нажми «Повторить».') from None
     return parse_spotify_embed(response.text[:4_000_000], ident)
+
+
+def spotify_search_metadata(url):
+    """Resolve a search label; missing duration must not block manual selection.
+
+    Kept separate from spotify_metadata: automatic downloads still require
+    verified artist, title and full-track duration before choosing a result.
+    """
+    from source_metadata import page_metadata
+    ident, canonical = spotify_reference(url)
+    headers = {'User-Agent': 'Mozilla/5.0', 'Accept-Language': 'en-US,en;q=0.8'}
+    failure = 'Spotify не отдал название трека.'
+    for endpoint, mode in (('https://open.spotify.com/embed/track/' + ident, 'embed'),
+                           (canonical, 'page'),
+                           ('https://open.spotify.com/oembed', 'oembed')):
+        try:
+            options = dict(headers=headers, timeout=(5, 8))
+            if mode == 'oembed':
+                options['params'] = {'url': canonical}
+            response = requests.get(endpoint, **options)
+            response.raise_for_status()
+            if mode == 'embed':
+                try:
+                    return parse_spotify_embed(response.text[:4_000_000], ident, require_duration=False)
+                except SpotifyError:
+                    continue
+            if mode == 'page':
+                metadata = page_metadata(response.text[:2_000_000])
+                if metadata and valid_search_title(metadata.get('track')):
+                    return metadata
+            else:
+                data = response.json()
+                title = data.get('title') if isinstance(data, dict) else None
+                if valid_search_title(title):
+                    # oEmbed may expose only the song title. These results are
+                    # displayed for human selection, never matched automatically.
+                    return dict(title=title.strip(), track=title.strip(), artist='', duration=0)
+        except requests.RequestException as error:
+            status = getattr(getattr(error, 'response', None), 'status_code', None)
+            failure = f'Spotify вернул HTTP {status}.' if status else 'Не удалось связаться со Spotify.'
+        except (ValueError, TypeError):
+            continue
+    raise SpotifyError(failure + ' Введи исполнителя и название во второе поле и нажми «Искать», либо вставь ссылку YouTube внизу.')
+
+
+def valid_search_title(value):
+    return (isinstance(value, str) and bool(value.strip()) and
+            not re.search(r'https?://', value, re.I) and
+            value.strip().casefold() not in {'spotify', 'spotify web player', 'spotify – web player',
+                                            'spotify - web player', 'login', 'sign in'})
 
 
 def words(value):

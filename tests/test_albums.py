@@ -50,6 +50,38 @@ class AlbumStoreTests(unittest.TestCase):
         self.assertEqual(self.store.rows('history')[0]['rating'],66)
         self.assertEqual(len(self.store.album_tracks(album)),2)
 
+    def test_reward_limit_refresh_updates_old_album_children_and_survives_restart(self):
+        from media import metadata_filter
+        meta=album_metadata(); meta['tracks'][0]['duration']=3600
+        album, ids=create_album(self.store,self.root/'Альбомы',meta,redemption='redeemed',
+                               max_duration=900,reward_title='Альбом до 15 минут')
+        self.store.update(ids[0],status='Ошибка Яндекса',error='Трек длиннее 15 минут')
+        self.store.update_album_progress(album)
+        reward=dict(id='album-reward',title='Альбом до 90 минут',limit=5400)
+        self.assertEqual(self.store.sync_reward_limits([reward]),1)
+        for row in [self.store.album_request(album)] + self.store.album_tracks(album):
+            self.assertEqual(row['max_duration'],5400)
+            self.assertEqual(row['reward_id'],'album-reward')
+        self.assertIsNone(metadata_filter({'duration':3600},max_seconds=self.store.get(ids[0])['max_duration']))
+        self.store.db.close(); self.store=QueueStore(self.path)
+        self.assertEqual(self.store.get(ids[0])['max_duration'],5400)
+        # Once ID is saved, renames no longer interfere with matching.
+        self.store.sync_reward_limits([dict(reward,title='Новый альбом',limit=720)])
+        self.assertEqual(self.store.get(ids[0])['max_duration'],720)
+        self.assertIsNotNone(metadata_filter({'duration':3600},max_seconds=720))
+
+    def test_reward_sync_does_not_guess_ambiguous_legacy_titles_or_change_manual(self):
+        album, ids=create_album(self.store,self.root/'Альбомы',album_metadata(),redemption='r1',
+                               max_duration=900,reward_title='Альбом до 15 минут')
+        manual=self.store.add('https://youtu.be/manual',max_duration=123)
+        other=self.store.add('https://youtu.be/other',redemption='r2',max_duration=300,
+                             reward_title='Другой трек',reward_id='other')
+        rewards=[dict(id='a',title='Альбом до 90 минут',limit=5400),dict(id='b',title='Альбом до 5 минут',limit=300)]
+        self.assertEqual(self.store.sync_reward_limits(rewards),0)
+        self.assertEqual(self.store.get(ids[0])['max_duration'],900)
+        self.assertEqual(self.store.get(manual)['max_duration'],123)
+        self.assertEqual(self.store.get(other)['max_duration'],300)
+
     def test_partial_download_error_never_marks_whole_album_ready(self):
         album,ids=create_album(self.store,self.root/'Альбомы',album_metadata())
         self.ready(ids[:1])

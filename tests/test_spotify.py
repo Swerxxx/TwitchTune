@@ -34,6 +34,37 @@ class SpotifyTests(unittest.TestCase):
             self.assertEqual(spotify_metadata(URL), META)
         self.assertEqual(get.call_args.args[0], 'https://open.spotify.com/embed/track/Test123')
 
+    def test_search_accepts_missing_duration_but_auto_download_does_not(self):
+        from spotify_support import spotify_search_metadata
+        html = self.embed(duration=0)
+        with patch('spotify_support.requests.get', return_value=Mock(text=html)):
+            self.assertEqual(spotify_search_metadata(URL)['title'], 'Artist — Song')
+            with self.assertRaises(SpotifyError):
+                spotify_metadata(URL)
+
+    def test_search_falls_back_to_public_page_after_embed_schema_change(self):
+        from spotify_support import spotify_search_metadata
+        page = '<script type="application/ld+json">' + json.dumps({
+            '@type': 'MusicRecording', 'name': 'Song', 'byArtist': [{'name': 'Artist'}]}) + '</script>'
+        with patch('spotify_support.requests.get', side_effect=[Mock(text='<html>New embed</html>'), Mock(text=page)]) as get:
+            metadata = spotify_search_metadata(URL)
+        self.assertEqual(metadata['title'], 'Artist — Song')
+        self.assertEqual(metadata['duration'], 0)
+        self.assertEqual(get.call_count, 2)
+
+    def test_search_uses_oembed_title_if_other_resolvers_fail(self):
+        from spotify_support import spotify_search_metadata
+        import requests
+        with patch('spotify_support.requests.get', side_effect=[requests.Timeout(), Mock(text='<html>Login</html>'), Mock(json=Mock(return_value={'title': 'Song'}))]) as get:
+            self.assertEqual(spotify_search_metadata(URL)['track'], 'Song')
+        self.assertEqual(get.call_args.kwargs['params']['url'], 'https://open.spotify.com/track/Test123')
+
+    def test_search_rejects_generic_spotify_pages(self):
+        from spotify_support import spotify_search_metadata
+        with patch('spotify_support.requests.get', side_effect=[Mock(text=''), Mock(text=''), Mock(json=Mock(return_value={'title': 'Spotify'}))]):
+            with self.assertRaisesRegex(SpotifyError, 'второе поле'):
+                spotify_search_metadata(URL)
+
     def test_missing_or_wrong_metadata_cannot_select_a_song(self):
         for html in ('<html>Sign in</html>', self.embed(uri='spotify:track:Other'), self.embed(artists=[]), self.embed(duration=0), self.embed(type='album')):
             with self.subTest(html=html), self.assertRaises(SpotifyError):

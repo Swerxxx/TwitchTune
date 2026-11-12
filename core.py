@@ -80,7 +80,7 @@ class QueueStore:
                                  'created_at': 'REAL DEFAULT 0', 'finished_at': 'REAL DEFAULT 0',
                                  'artist': "TEXT DEFAULT ''", 'track': "TEXT DEFAULT ''",
                                  'duration': 'REAL DEFAULT 0', 'max_duration': f'INTEGER DEFAULT {MAX_TRACK_SECONDS}',
-                                 'reward_title': "TEXT DEFAULT ''", 'cover_url': "TEXT DEFAULT ''",
+                                 'reward_id': "TEXT DEFAULT ''", 'reward_title': "TEXT DEFAULT ''", 'cover_url': "TEXT DEFAULT ''",
                                  'cover_path': "TEXT DEFAULT ''", 'description_lyrics': "TEXT DEFAULT ''",
                                  'submitted_lyrics': 'TEXT', 'description_checked': 'INTEGER DEFAULT 0', 'soundcloud_description': "TEXT DEFAULT ''", 'vip_priority': 'INTEGER DEFAULT 0',
                                  'donation_priority': 'INTEGER DEFAULT 0', 'donation_provider': "TEXT DEFAULT ''",
@@ -121,12 +121,12 @@ class QueueStore:
                      (COALESCE(parent.redemption,'')!='' AND parent.redemption NOT LIKE 'donation:%')))""",(MAX_TRACK_SECONDS,))
         self.db.commit()
 
-    def add(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None):
+    def add(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None, reward_id=''):
         if type(max_duration) is not int or not 1 <= max_duration <= MAX_TRACK_SECONDS:
             raise ValueError('Лимит длительности должен быть от 1 секунды до 90 минут.')
         tg_code = telegram_request(text)
         url, source = ('', 'Telegram') if tg_code is not None else parse_link(text)
-        return self._add(url, source, viewer, redemption, viewer_id, max_duration, reward_title, tg_code, donation=donation)
+        return self._add(url, source, viewer, redemption, viewer_id, max_duration, reward_title, tg_code, donation=donation, reward_id=reward_id)
 
     def add_local(self, metadata, viewer='Вручную'):
         if not re.fullmatch(r'[a-f0-9]{32}', metadata.get('id', '')):
@@ -138,7 +138,7 @@ class QueueStore:
                          max_duration, reward_title, order['code'], local=order)
 
     def _add(self, url, source, viewer='Вручную', redemption=None, viewer_id=None,
-             max_duration=MAX_TRACK_SECONDS, reward_title='', tg_code=None, local=None, donation=None):
+             max_duration=MAX_TRACK_SECONDS, reward_title='', tg_code=None, local=None, donation=None, reward_id=''):
         if type(max_duration) is not int or not 1 <= max_duration <= MAX_TRACK_SECONDS:
             raise ValueError('Лимит длительности должен быть от 1 секунды до 90 минут.')
         with self.lock:
@@ -185,6 +185,7 @@ class QueueStore:
                 self.db.execute('UPDATE queue SET title=?, artist=?, track=?, duration=?, path=?, cover_path=?, status=? WHERE id=?',
                     (local['title'], local.get('artist', ''), local.get('track', ''), local['duration'],
                      local['path'], local.get('cover_path', ''), 'Готово', ident))
+            self.db.execute('UPDATE queue SET reward_id=? WHERE id=?', (str(reward_id), ident))
             if local and source == 'Telegram':
                 self.db.execute('UPDATE queue SET submitted_lyrics=? WHERE id=?', (local['lyrics'], ident))
                 self.db.execute(
@@ -449,7 +450,7 @@ class QueueStore:
         with self.lock:
             return [dict(r) for r in self.db.execute('SELECT * FROM queue WHERE album_id=? AND album_position>0 ORDER BY album_position', (ident,))]
 
-    def add_album(self, metadata, folder, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None):
+    def add_album(self, metadata, folder, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None, reward_id=''):
         tracks = metadata.get('tracks') or []
         if not 1 <= len(tracks) <= 100:
             raise ValueError('В альбоме должно быть от 1 до 100 треков.')
@@ -461,7 +462,7 @@ class QueueStore:
             if existing and not redemption:
                 return existing['id'], []
             ident = uuid.uuid4().hex
-            parent = self._add(metadata['url'], 'Альбом', viewer, redemption, viewer_id, max_duration, reward_title, donation=donation)
+            parent = self._add(metadata['url'], 'Альбом', viewer, redemption, viewer_id, max_duration, reward_title, donation=donation, reward_id=reward_id)
             parent_row = self.get(parent)
             key, viewer = parent_row['viewer_key'], parent_row['viewer']
             position = parent_row['position']
@@ -487,7 +488,42 @@ class QueueStore:
                     self.db.execute('DELETE FROM deleted_redemptions WHERE redemption=?',(redemption,))
                     self.db.commit()
                 raise
+            self.db.execute('UPDATE queue SET reward_id=? WHERE album_id=?', (str(reward_id), ident))
+            self.db.commit()
             return ident,ids
+
+    def sync_reward_limits(self, rewards):
+        """Refresh unfinished requests and album children, preserving history.
+
+        Old databases have only the title. Adopt a reward ID only for a unique
+        exact title match, or a unique title match ignoring duration numbers.
+        """
+        def signature(title):
+            return re.sub(r'\s+', ' ', re.sub(r'\d+(?:[.,:]\d+)*', '#', title.casefold())).strip()
+        rewards = [r for r in rewards if isinstance(r.get('id'), str) and r['id'] and
+                   type(r.get('limit')) is int and 1 <= r['limit'] <= MAX_TRACK_SECONDS]
+        by_id = {r['id']: r for r in rewards}
+        changed = 0
+        with self.lock, self.db:
+            parents = self.db.execute("""SELECT * FROM queue WHERE in_queue=1
+                AND album_position=0 AND status NOT IN ('Прослушано','Пропущено','Ждёт оценки')""").fetchall()
+            for row in parents:
+                reward = by_id.get(row['reward_id'])
+                if not row['reward_id'] and row['reward_title'] and row['redemption'] and not row['redemption'].startswith('donation:'):
+                    candidates = [r for r in rewards if r['title'] == row['reward_title']]
+                    if not candidates:
+                        candidates = [r for r in rewards if signature(r['title']) == signature(row['reward_title'])]
+                    if len(candidates) == 1:
+                        reward = candidates[0]
+                if reward is None:
+                    continue
+                values = (reward['limit'], reward['title'], reward['id'])
+                if row['max_duration'] != values[0] or row['reward_title'] != values[1] or row['reward_id'] != values[2]:
+                    self.db.execute('UPDATE queue SET max_duration=?,reward_title=?,reward_id=? WHERE id=?', values + (row['id'],))
+                    changed += 1
+                if row['source'] == 'Альбом' and row['album_id']:
+                    self.db.execute('UPDATE queue SET max_duration=?,reward_title=?,reward_id=? WHERE album_id=? AND album_position>0', values + (row['album_id'],))
+        return changed
 
     def album_request(self, ident):
         with self.lock:
