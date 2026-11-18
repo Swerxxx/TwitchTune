@@ -18,5 +18,9 @@ if ($LASTEXITCODE -ne 0) { throw 'yt-dlp update failed.' }
   --hidden-import websocket `
   --hidden-import requests app.py
 if ($LASTEXITCODE -ne 0) { throw 'TwitchTune build failed.' }
+& $Python -m PyInstaller --noconfirm --clean --name TwitchTuneBridge --console --onefile browser_native_host.py
+if ($LASTEXITCODE -ne 0) { throw 'Browser bridge build failed.' }
+Copy-Item dist/TwitchTuneBridge.exe dist/TwitchTune/TwitchTuneBridge.exe -Force
+Copy-Item BROWSER_EXTENSION.md dist/TwitchTune/BROWSER_EXTENSION.md -Force
 Copy-Item run_debug.bat dist\TwitchTune\run_debug.bat -Force
 Write-Host "Готово: dist\TwitchTune\TwitchTune.exe"

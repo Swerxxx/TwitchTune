@@ -782,6 +782,41 @@ class AppTests(unittest.TestCase):
         self.assertFalse(self.window.play.playing)
         self.assertFalse(self.window.deck.timer.isActive())
 
+    def test_album_twitch_completion_waits_for_last_track(self):
+        from test_albums import album_metadata
+        album, ids=self.window.store.add_album(album_metadata(),Path(self.folder.name)/'album',
+                                               redemption='album-request',reward_id='reward')
+        parent=self.window.store.album_request(album)
+        self.window.twitch_completions.bind(dict(id='album-request',reward={'id':'reward'},broadcaster_user_id='channel'),'app')
+        self.window.current=parent['id']; self.window.album_track_index=0
+        with patch.object(self.window,'play_album_at') as next_track:
+            self.window.media_status(QMediaPlayer.EndOfMedia)
+            next_track.assert_called_once_with(album,1)
+        state=lambda:self.window.store.db.execute("SELECT state FROM twitch_completions WHERE redemption='album-request'").fetchone()[0]
+        self.assertEqual(state(),'waiting')
+        self.window.album_track_index=1
+        self.window.media_status(QMediaPlayer.EndOfMedia)
+        self.assertEqual(state(),'awaiting_rating')
+
+    def test_natural_end_waits_for_rating_and_skip_does_not_fulfill(self):
+        ident=self.ready()
+        self.window.store.db.execute("UPDATE queue SET redemption='request',reward_id='reward' WHERE id=?",(ident,))
+        self.window.store.db.commit()
+        self.window.twitch_completions.bind(dict(id='request',reward={'id':'reward'},broadcaster_user_id='channel'),'app')
+        self.window.play_row(self.window.store.get(ident))
+        self.window.media_status(QMediaPlayer.EndOfMedia)
+        state=self.window.store.db.execute("SELECT state FROM twitch_completions WHERE redemption='request'").fetchone()[0]
+        self.assertEqual(state,'awaiting_rating')
+        self.assertEqual(self.window.store.get(ident)['status'],'Ждёт оценки')
+        self.assertIsNone(self.window.current)
+        other=self.ready()
+        self.window.store.db.execute("UPDATE queue SET redemption='skipped',reward_id='reward' WHERE id=?",(other,))
+        self.window.store.db.commit()
+        self.window.twitch_completions.bind(dict(id='skipped',reward={'id':'reward'},broadcaster_user_id='channel'),'app')
+        self.window.play_row(self.window.store.get(other))
+        self.window.skip_current()
+        self.assertEqual(self.window.store.db.execute("SELECT state FROM twitch_completions WHERE redemption='skipped'").fetchone()[0],'waiting')
+
     def test_settings_palettes_apply_without_interrupting_playback(self):
         from theme import THEMES
         ident = self.ready()

@@ -10,7 +10,16 @@ import websocket
 
 BASE = 'https://api.twitch.tv/helix/'
 OAUTH = 'https://id.twitch.tv/oauth2/'
-SCOPE = 'channel:read:redemptions'
+READ_SCOPE = 'channel:read:redemptions'
+MANAGE_SCOPE = 'channel:manage:redemptions'
+SCOPE = READ_SCOPE + ' ' + MANAGE_SCOPE
+
+
+class TwitchAPIError(RuntimeError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
 
 class TwitchClient:
     def __init__(self, client_id, emit):
@@ -24,7 +33,7 @@ class TwitchClient:
 
     def check(self, response):
         if not response.ok:
-            raise RuntimeError(f'Twitch HTTP {response.status_code}: проверь вход, Client ID и доступ к наградам.')
+            raise TwitchAPIError(response.status_code, f'Twitch HTTP {response.status_code}: проверь вход, Client ID и доступ к наградам.')
         return response.json()
 
     def persist(self):
@@ -47,7 +56,7 @@ class TwitchClient:
             self.refresh()
             r = requests.get(OAUTH+'validate', headers={'Authorization': 'OAuth '+self.tokens['access_token']}, timeout=15)
         info = self.check(r)
-        if info.get('client_id') != self.client_id or SCOPE not in info.get('scopes', []):
+        if info.get('client_id') != self.client_id or not ({READ_SCOPE, MANAGE_SCOPE} & set(info.get('scopes', []))):
             raise RuntimeError('Неверный Client ID или нет разрешения channel:read:redemptions. Войди заново.')
         self.user = info
         self.last_validate = time.monotonic()
@@ -95,6 +104,35 @@ class TwitchClient:
 
     def rewards(self):
         return self.api('GET', 'channel_points/custom_rewards', params={'broadcaster_id': self.user['user_id']})['data']
+
+    def require_manage(self):
+        if not self.user or MANAGE_SCOPE not in self.user.get('scopes', []):
+            raise TwitchAPIError(401, 'Нужно заново разрешить управление наградами: нажми «Создать награду» и подтверди вход Twitch.')
+
+    def create_music_reward(self, title, cost):
+        self.require_manage()
+        if not isinstance(title,str) or not 1 <= len(title.strip()) <= 45 or type(cost) is not int or not 1 <= cost <= 1_000_000_000:
+            raise ValueError('Название: 1–45 символов; стоимость: 1–1 000 000 000 баллов.')
+        return self.api('POST','channel_points/custom_rewards',
+            params={'broadcaster_id':self.user['user_id']},json={
+                'title':title.strip(),'cost':cost,'is_user_input_required':True,
+                'prompt':'Вставь ссылку на трек или код MP3 из Telegram.',
+                'should_redemptions_skip_request_queue':False})['data'][0]
+
+    def fulfill_redemption(self, reward_id, redemption_id):
+        self.require_manage()
+        params={'broadcaster_id':self.user['user_id'],'reward_id':reward_id,'id':redemption_id}
+        try:
+            result=self.api('PATCH','channel_points/custom_rewards/redemptions',params=params,json={'status':'FULFILLED'})
+        except TwitchAPIError as exc:
+            if exc.status == 403:
+                raise TwitchAPIError(403, 'Twitch разрешает закрывать заказы только для награды, созданной через этот Client ID. Создай новую награду кнопкой «Создать награду».') from None
+            if exc.status != 404:
+                raise
+            # A successful PATCH whose response was lost may already be applied.
+            result=self.api('GET','channel_points/custom_rewards/redemptions',params=params)
+        data=result.get('data') or []
+        return next((item['status'] for item in data if item.get('id')==redemption_id), '')
 
     def connect(self, reward_id):
         self.stopping.clear()
