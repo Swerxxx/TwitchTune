@@ -5,6 +5,10 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  PREVIEW_ARCHIVE: TwitchTune-1.1.8-Browser-History-Test-Windows-x64.zip
+  PREVIEW_ARTIFACT: TwitchTune-1.1.8-Browser-History-Test
+  PREVIEW_TAG: browser-preview-1.1.8-history.1
 jobs:
   preview:
     runs-on: windows-2022
@@ -65,15 +69,15 @@ jobs:
       - name: Package Windows preview
         shell: pwsh
         run: |
-          python -m zipfile -c TwitchTune-1.1.8-Browser-Preview-Windows-x64.zip dist/TwitchTune
+          python -m zipfile -c "$env:PREVIEW_ARCHIVE" dist/TwitchTune
           if ($LASTEXITCODE -ne 0) { throw 'Preview packaging failed.' }
-          python -c "from zipfile import ZipFile; archive=ZipFile('TwitchTune-1.1.8-Browser-Preview-Windows-x64.zip'); assert archive.testzip() is None; assert 'TwitchTune/TwitchTune.exe' in archive.namelist()"
+          python -c "import sys; from zipfile import ZipFile; archive=ZipFile(sys.argv[1]); assert archive.testzip() is None; assert 'TwitchTune/TwitchTune.exe' in archive.namelist()" "$env:PREVIEW_ARCHIVE"
           if ($LASTEXITCODE -ne 0) { throw 'Preview archive validation failed.' }
       - name: Upload preview archive
         uses: actions/upload-artifact@v4
         with:
-          name: TwitchTune-1.1.8-Browser-Preview
-          path: TwitchTune-1.1.8-Browser-Preview-Windows-x64.zip
+          name: ${{ env.PREVIEW_ARTIFACT }}
+          path: ${{ env.PREVIEW_ARCHIVE }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
@@ -86,25 +90,26 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: TwitchTune-1.1.8-Browser-Preview
+          name: ${{ env.PREVIEW_ARTIFACT }}
       - name: Publish Windows prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag=browser-preview-1.1.8
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Preview $tag is already published."
+          if gh release view "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Preview $PREVIEW_TAG is already published."
             exit 0
           fi
           cat > preview-notes.md <<'EOF'
-          Тестовая сборка TwitchTune для Windows x64 с расширением для очереди наград Twitch.
+          Тестовая сборка TwitchTune для Windows x64 с поддержкой старых заказов Twitch.
 
-          - Расширение может подтвердить заявку по существующей награде после прослушивания и оценки, если находит точный ID заявки в очереди Twitch.
-          - В Firefox поддерживаются русская кнопка «Пометить как выполненное» и карточки, где название награды показано в боковой панели.
-          - Распакуйте весь ZIP. Инструкция по временной установке расширения Firefox находится в `BROWSER_EXTENSION.md` рядом с `TwitchTune.exe`.
+          - Уже прослушанные и оценённые заказы из сохранённой очереди TwitchTune можно подтвердить по точному ID.
+          - Кнопка «Импортировать старые заказы» переносит заявки с открытой страницы Twitch. TwitchTune принимает заявки по выбранным в программе наградам. Повторный импорт сохраняет одну запись на заказ.
+          - Автоподтверждение срабатывает после прослушивания и оценки. TwitchTune отмечает завершение после подтверждения от Twitch.
 
-          Проверьте сборку на одной тестовой заявке. Поддержка текущей страницы очереди зависит от её разметки. Этот предрелиз устанавливается вручную.
+          Сценарии проверены на тестовой очереди. Импорт зависит от того, доступны ли точные ID заказа и награды на странице Twitch.
+
+          Распакуйте весь ZIP и запустите `TwitchTune.exe`. Инструкция по временному подключению Firefox находится в `BROWSER_EXTENSION.md`.
           EOF
-          gh release create "$tag" TwitchTune-1.1.8-Browser-Preview-Windows-x64.zip \
+          gh release create "$PREVIEW_TAG" "$PREVIEW_ARCHIVE" \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
-            --title 'TwitchTune 1.1.8 Browser Preview' --notes-file preview-notes.md
+            --title 'TwitchTune 1.1.8 Browser Preview 2 — старые заказы' --notes-file preview-notes.md

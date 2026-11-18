@@ -1263,7 +1263,23 @@ class Main(QMainWindow):
     def browser_bridge_heartbeat(self):
         if self.closing:
             return
-        self.browser_bridge.heartbeat(bool(self.cfg.get('browser_completion_enabled')) and not self.closing, self.client)
+        enabled = bool(self.cfg.get('browser_completion_enabled'))
+        self.browser_bridge.heartbeat(enabled, self.client)
+        user = (self.client.user or {}) if self.client else {}
+        if enabled and user.get('user_id') and user.get('login') and self.reward_catalog_loaded:
+            self.twitch_completions.adopt_browser_history(self.client, self.active_reward_limits)
+            self.import_browser_history()
+
+    def import_browser_history(self):
+        rewards = {reward['id']: reward for reward in self.available_rewards if reward['id'] in self.active_reward_limits}
+        for event in self.browser_bridge.pending_history():
+            reward = rewards.get(event['reward']['id'])
+            if reward is not None:
+                event['reward'] = reward
+                self.redeem(event)
+            else:
+                self.log.appendPlainText('Старая заявка пропущена: эта награда не выбрана в TwitchTune.')
+            self.browser_bridge.acknowledge_history(event['id'], self.client)
 
     def set_browser_completion(self, enabled):
         self.cfg['browser_completion_enabled'] = bool(enabled)

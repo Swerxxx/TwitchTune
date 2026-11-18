@@ -22,10 +22,22 @@ class TwitchCompletions:
         with self.store.lock, self.store.db:
             self.store.db.execute('INSERT OR IGNORE INTO twitch_completions(redemption,reward,broadcaster,client) VALUES(?,?,?,?)',
                                   (redemption, reward, broadcaster, client_id))
-            self.store.db.execute("UPDATE twitch_completions SET viewer_login=?,user_input=?,reward_title=?,channel_login=? WHERE redemption=? AND viewer_login=''",
+            self.store.db.execute("UPDATE twitch_completions SET viewer_login=?,user_input=?,reward_title=?,channel_login=? WHERE redemption=? AND broadcaster=? AND client=? AND viewer_login=''",
                 (str(event.get('user_login') or event.get('user_name') or '')[:200],
                  str(event.get('user_input') or '')[:4000],str((event.get('reward') or {}).get('title') or '')[:300],
-                 str(event.get('broadcaster_user_login') or '').lower()[:100],redemption))
+                 str(event.get('broadcaster_user_login') or '').lower()[:100],redemption,broadcaster,client_id))
+
+    def adopt_browser_history(self, client, reward_ids):
+        if not reward_ids:
+            return
+        selected = ','.join('?' for _ in reward_ids)
+        with self.store.lock, self.store.db:
+            self.store.db.execute(f'''INSERT OR IGNORE INTO twitch_completions(redemption,reward,broadcaster,client,state)
+                SELECT redemption,reward_id,?,?,'pending' FROM queue
+                WHERE redemption IS NOT NULL AND redemption!='' AND redemption NOT LIKE 'donation:%'
+                AND rating IS NOT NULL AND status='Прослушано' AND completion_status='Прослушано'
+                AND reward_id IN ({selected})''',
+                (client.user['user_id'], client.client_id, *reward_ids))
 
     def listened(self, row, client=None):
         if not row or not row.get('redemption') or row['redemption'].startswith('donation:'):

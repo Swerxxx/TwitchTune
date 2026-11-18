@@ -15,6 +15,8 @@ FIREFOX_ID = 'twitchtune-queue@swerxxx'
 # Chromium ID is set by the public key in the bundled manifest.
 CHROMIUM_ID = 'pfnnmpmfllkegohmjckllkimggghdpoe'
 MAX_MESSAGE = 262144
+HISTORY_LIMIT = 50
+TWITCH_ID = re.compile(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', re.IGNORECASE)
 
 
 def migrate(db):
@@ -29,6 +31,9 @@ def migrate(db):
     db.execute('''CREATE TABLE IF NOT EXISTS browser_bridge_session (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1), enabled INTEGER,
         broadcaster TEXT, client TEXT, login TEXT, expires REAL)''')
+    db.execute('''CREATE TABLE IF NOT EXISTS browser_imports (
+        redemption TEXT, broadcaster TEXT, client TEXT, event TEXT,
+        PRIMARY KEY(redemption, broadcaster, client))''')
     db.commit()
 
 
@@ -71,7 +76,9 @@ class BrowserBridge:
                 (session['client'],session['broadcaster'])).fetchall()
             return dict(ok=True, channel=session['login'], counts={r['state']:r['n'] for r in rows})
         if action == 'claim':
-            return self.claim(message.get('channel'))
+            return self.claim(message.get('channel'), message.get('visibleIds'))
+        if action == 'import_history':
+            return self.import_history(message.get('channel'), message.get('orders'))
         if action == 'report':
             return self.report(message)
         if action == 'retry':
@@ -82,19 +89,23 @@ class BrowserBridge:
             return dict(ok=True)
         raise ValueError('Неизвестная команда расширения.')
 
-    def claim(self, channel):
+    def claim(self, channel, visible_ids=None):
+        if visible_ids is not None and (not isinstance(visible_ids, list) or len(visible_ids) > 200
+                or any(not isinstance(ident, str) or not 1 <= len(ident) <= 128 for ident in visible_ids)):
+            raise ValueError('Недопустимый список заявок на странице.')
+        visible_filter = '' if visible_ids is None else 'AND c.redemption IN (' + ','.join('?' for _ in visible_ids) + ')'
         # Immediate transaction prevents two browser windows claiming the same job.
         self.db.execute('BEGIN IMMEDIATE')
         try:
             session=self.session(channel)
             now=time.time()
             self.db.execute("UPDATE twitch_completions SET state='pending',lease_token='' WHERE state='browser_claimed' AND lease_until<?", (now,))
-            row=self.db.execute('''SELECT c.*,q.rating,q.completion_status,q.status AS queue_status FROM twitch_completions c
+            row=self.db.execute(f'''SELECT c.*,q.rating,q.completion_status,q.status AS queue_status FROM twitch_completions c
                 JOIN queue q ON q.redemption=c.redemption
-                WHERE c.client=? AND c.broadcaster=? AND c.state IN ('pending','awaiting_rating','blocked')
+                WHERE c.client=? AND c.broadcaster=? AND c.state IN ('waiting','pending','awaiting_rating','blocked')
                   AND c.retry_at<=? AND q.rating IS NOT NULL
-                  AND q.completion_status='Прослушано'
-                ORDER BY c.retry_at,c.redemption LIMIT 1''', (session['client'],session['broadcaster'],now)).fetchone()
+                  AND q.status='Прослушано' AND q.completion_status='Прослушано' {visible_filter}
+                ORDER BY c.retry_at,c.redemption LIMIT 1''', (session['client'],session['broadcaster'],now,*(visible_ids or []))).fetchone()
             if not row:
                 self.db.commit(); return dict(ok=True,task=None)
             # Old requests missing the original input may still match by exact ID.
@@ -110,6 +121,52 @@ class BrowserBridge:
                 lease=token,uniqueKnownOrder=duplicates==1))
         except Exception:
             self.db.rollback(); raise
+
+    def import_history(self, channel, orders):
+        session = self.session(channel)
+        if not isinstance(orders, list) or len(orders) > HISTORY_LIMIT:
+            raise ValueError('Недопустимый список старых заявок.')
+        events = []
+        for order in orders:
+            if not isinstance(order, dict):
+                raise ValueError('Некорректная старая заявка.')
+            ident, reward = order.get('id'), order.get('rewardId')
+            viewer, text = order.get('viewer'), order.get('input')
+            viewer_id = order.get('viewerId', '')
+            if (not isinstance(ident, str) or not TWITCH_ID.fullmatch(ident)
+                    or not isinstance(reward, str) or not TWITCH_ID.fullmatch(reward)
+                    or not isinstance(viewer, str) or not 1 <= len(viewer) <= 200
+                    or not isinstance(text, str) or not 1 <= len(text) <= 4000
+                    or not isinstance(viewer_id, str) or len(viewer_id) > 100):
+                raise ValueError('В старой заявке не хватает точных данных Twitch.')
+            event = dict(id=ident, reward={'id': reward}, user_login=viewer, user_name=viewer,
+                         user_id=viewer_id or None, user_input=text, status='UNFULFILLED',
+                         broadcaster_user_id=session['broadcaster'], broadcaster_user_login=session['login'])
+            events.append((ident, session['broadcaster'], session['client'], json.dumps(event), ident, ident, ident))
+        with self.db:
+            result = self.db.executemany('''INSERT OR IGNORE INTO browser_imports(redemption,broadcaster,client,event)
+                SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM queue WHERE redemption=?)
+                AND NOT EXISTS (SELECT 1 FROM deleted_redemptions WHERE redemption=?)
+                AND NOT EXISTS (SELECT 1 FROM twitch_completions WHERE redemption=?
+                    AND state IN ('fulfilled','canceled','discarded','browser_verify'))''', events)
+        return dict(ok=True, queued=result.rowcount)
+
+    def pending_history(self):
+        session = self.session()
+        with self.db:
+            self.db.execute('''DELETE FROM browser_imports WHERE broadcaster=? AND client=? AND (
+                redemption IN (SELECT redemption FROM queue WHERE redemption IS NOT NULL)
+                OR redemption IN (SELECT redemption FROM deleted_redemptions)
+                OR redemption IN (SELECT redemption FROM twitch_completions
+                    WHERE state IN ('fulfilled','canceled','discarded','browser_verify')))''',
+                (session['broadcaster'], session['client']))
+        return [json.loads(row['event']) for row in self.db.execute('''SELECT event FROM browser_imports
+            WHERE broadcaster=? AND client=? ORDER BY rowid LIMIT 10''', (session['broadcaster'], session['client']))]
+
+    def acknowledge_history(self, redemption, client):
+        with self.db:
+            self.db.execute('DELETE FROM browser_imports WHERE redemption=? AND broadcaster=? AND client=?',
+                            (redemption, client.user['user_id'], client.client_id))
 
     def report(self, message):
         session=self.session(message.get('channel'))
@@ -135,11 +192,11 @@ class BrowserBridge:
 
     def actionable(self, ident, lease, channel):
         session=self.session(channel)
-        row=self.db.execute('''SELECT c.state,c.lease_until,q.rating,q.completion_status FROM twitch_completions c
+        row=self.db.execute('''SELECT c.state,c.lease_until,q.rating,q.status AS queue_status,q.completion_status FROM twitch_completions c
             JOIN queue q ON q.redemption=c.redemption WHERE c.redemption=? AND c.lease_token=?
             AND c.client=? AND c.broadcaster=?''', (ident,lease,session['client'],session['broadcaster'])).fetchone()
         return bool(row and row['state']=='browser_claimed' and row['lease_until']>=time.time()
-                    and row['rating'] is not None and row['completion_status']=='Прослушано')
+                    and row['rating'] is not None and row['queue_status']=='Прослушано' and row['completion_status']=='Прослушано')
 
 
 def register_native_host(profile, browser):

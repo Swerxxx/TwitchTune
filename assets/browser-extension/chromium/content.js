@@ -30,26 +30,40 @@ function containerSelector(node){
 function pageValue(object, name){
  return object==null?undefined:Object.getOwnPropertyDescriptor(object,name)?.value;
 }
-function readTwitchIds(row){
+function historicalOrder(redemption, id){
+ const reward=pageValue(redemption,'reward');
+ const rewardId=pageValue(reward,'id')??pageValue(redemption,'rewardID')??pageValue(redemption,'rewardId')??pageValue(redemption,'reward_id');
+ const input=pageValue(redemption,'userInput')??pageValue(redemption,'user_input');
+ const status=pageValue(redemption,'status');
+ if(typeof rewardId!=='string'||!uuid.test(rewardId)||typeof input!=='string'||!input.trim()||input.length>4000
+   ||(status!=null&&(typeof status!=='string'||status.toUpperCase()!=='UNFULFILLED')))return null;
+ const viewerId=pageValue(pageValue(redemption,'user'),'id')??pageValue(redemption,'user_id');
+ return {id,rewardId,input,viewerId:typeof viewerId==='string'&&viewerId.length<=100?viewerId:''};
+}
+function readTwitchOrder(row, includeHistory){
  // Limit React inspection to this order and stop at the shared transition group.
  try{
   const element=row.wrappedJSObject||row;
   const list=row.parentElement.parentElement;
   const listElement=list.wrappedJSObject||list;
   const prop=Object.getOwnPropertyNames(element).find(name=>name.startsWith('__reactFiber$'));
-  if(!prop)return [];
+  if(!prop)return {ids:[],history:[]};
   const boundary=pageValue(listElement,prop);
-  if(!boundary)return [];
+  if(!boundary)return {ids:[],history:[]};
   const otherBoundary=pageValue(boundary,'alternate');
-  const ids=new Set(), keys=new Set();
+  const ids=new Set(), keys=new Set(), history=new Map();
   let node=pageValue(element,prop);
   for(let depth=0;node&&depth<24;depth++,node=pageValue(node,'return')){
-   if(node===boundary||node===otherBoundary)return [...(ids.size?ids:keys)];
+   if(node===boundary||node===otherBoundary)return {ids:[...(ids.size?ids:keys)],history:[...history.values()]};
    for(const version of [node,pageValue(node,'alternate')]){
     const props=pageValue(version,'memoizedProps');
     for(const redemption of [pageValue(props,'redemption'),pageValue(props,'rewardRedemption')]){
      const id=pageValue(redemption,'id');
-     if(typeof id==='string'&&uuid.test(id))ids.add(id);
+     if(typeof id==='string'&&uuid.test(id)){
+      ids.add(id);
+      const order=includeHistory&&historicalOrder(redemption,id);
+      if(order)history.set(JSON.stringify(order),order);
+     }
     }
     const reactKey=pageValue(version,'key');
     if(typeof reactKey!=='string')continue;
@@ -58,7 +72,7 @@ function readTwitchIds(row){
    }
   }
  }catch{/* Page objects may be unavailable or in a different React version. */}
- return [];
+ return {ids:[],history:[]};
 }
 function readIds(card){
  const ids=new Set();
@@ -72,7 +86,7 @@ function readIds(card){
   }
  }return [...ids];
 }
-function cards(){
+function cards(includeHistory=false){
  if(!config)return [];
  return [...document.querySelectorAll(config.card)].filter(visible).flatMap(root=>{
   const find=selector=>selector===':scope'?root:selector?root.querySelector(selector):null;
@@ -82,20 +96,37 @@ function cards(){
    if(controls.length!==1||controls[0]!==button||!visible(viewer)||!visible(input)||(config.reward&&!visible(reward)))return [];
   }
   let ids=readIds(root);
-  if(!ids.length){
+  let history=[];
+  if(!ids.length||includeHistory){
    const row=button?.closest(twitchCard);
    if(row?.matches(twitchTransitionCard)&&row.contains(viewer)&&row.contains(input)&&(!reward||row.contains(reward))){
-    ids=readTwitchIds(row);
+    const data=readTwitchOrder(row,includeHistory);
+    if(!ids.length)ids=data.ids;
+    history=data.history;
    }
   }
-  return [{root,button,ids,viewer:normalize(viewer?.innerText),reward:normalize(reward?.innerText),input:normalize(input?.innerText)}];
+  return [{root,button,ids,history,viewer:normalize(viewer?.innerText),reward:normalize(reward?.innerText),input:normalize(input?.innerText)}];
  });
 }
-function preflight(){
+function historyOnPage(){
+ const list=cards(true);
+ const orders=list.flatMap(card=>{
+  if(card.ids.length!==1||!card.viewer||card.viewer.length>200||!visible(card.button)
+    ||card.button.disabled||card.button.getAttribute('aria-disabled')==='true'||!completeLabel(label(card.button)))return [];
+  const [id]=card.ids;
+  if(list.some(other=>other!==card&&other.ids.includes(id))||card.history.length!==1)return [];
+  const [order]=card.history;
+  return order.id===id&&normalize(order.input)===card.input?[{...order,viewer:card.viewer}]:[];
+ });
+ return {orders:orders.slice(0,100)};
+}
+function preflight(includeIds=false){
  if(!config)return {ready:false,reason:'Нужна однократная настройка страницы в расширении.'};
  try{const list=cards();if(!list.length)return {ready:false,reason:'Нет подходящих карточек: очередь пуста или страница изменилась.'};
  if(!list.some(c=>c.ids.length))return {ready:false,reason:'Twitch не показывает ID заказа в карточках. Автоподтверждение приостановлено; требуется настройка под эту страницу.'};
- return {ready:true,count:list.length};}catch{return {ready:false,reason:'Разметка страницы изменилась. Настрой страницу заново.'};}
+ const result={ready:true,count:list.length};
+ if(includeIds)result.visibleIds=[...new Set(list.flatMap(card=>card.ids))].filter(id=>id.length<=128).slice(0,200);
+ return result;}catch{return {ready:false,reason:'Разметка страницы изменилась. Настрой страницу заново.'};}
 }
 async function complete(task){
  if(active)return {outcome:'blocked',note:'Уже выполняется другое задание'};
@@ -172,7 +203,8 @@ function calibrate(){
 }
 api.runtime.onMessage.addListener((message,sender,respond)=>{
  if(sender.id!==api.runtime.id)return false;
- if(message.kind==='preflight'){respond(preflight());return false;}
+ if(message.kind==='preflight'){respond(preflight(message.includeIds===true));return false;}
+ if(message.kind==='history'){respond(historyOnPage());return false;}
  if(message.kind==='calibrate'){calibrate();respond({ok:true});return false;}
  if(message.kind==='complete'){complete(message.task).then(respond);return true;}
  return false;

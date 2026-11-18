@@ -88,6 +88,42 @@ class BrowserBridgeTests(unittest.TestCase):
         self.ready();self.bridge.heartbeat(True,SimpleNamespace(client_id='other',user=self.client.user))
         self.assertIsNone(self.claim())
 
+    def test_claim_only_considers_card_ids_from_the_open_page(self):
+        self.ready()
+        for visible in ([], ['off-page']):
+            with self.subTest(visible=visible):
+                reply = self.bridge.handle(dict(action='claim', channel='streamer', visibleIds=visible))
+                self.assertIsNone(reply['task'])
+        reply = self.bridge.handle(dict(action='claim', channel='streamer', visibleIds=['redemption']))
+        self.assertEqual(reply['task']['id'], 'redemption')
+
+    def test_listened_and_rated_legacy_order_can_be_adopted(self):
+        ident = self.store.add('https://youtu.be/a', redemption='legacy', reward_id='reward')
+        self.store.rate(ident, 8)
+        self.completions.adopt_browser_history(self.client, ['reward'])
+        self.assertIsNone(self.claim())
+        self.store.finish(ident)
+        self.completions.adopt_browser_history(self.client, ['other'])
+        self.assertIsNone(self.claim())
+        self.completions.adopt_browser_history(self.client, ['reward'])
+        self.assertEqual(self.claim()['id'], 'legacy')
+
+    def test_twitch_only_history_can_be_enqueued_and_processed_once(self):
+        order = dict(id='daf11e60-ad17-439f-aa41-f2cfff6d93eb', rewardId='ad60aa17-a861-4218-abc2-91df2482728d',
+                     viewer='Viewer', viewerId='123', input='https://youtu.be/a')
+        message = dict(action='import_history', channel='streamer', orders=[order])
+        with self.assertRaises(ValueError):
+            self.bridge.handle(dict(message, channel='other'))
+        self.assertEqual(self.bridge.handle(message)['queued'], 1)
+        self.assertEqual(self.bridge.handle(message)['queued'], 0)
+        event, = self.bridge.pending_history()
+        self.assertEqual(event['reward']['id'], order['rewardId'])
+        self.assertEqual(event['broadcaster_user_id'], 'channel')
+        self.store.add(event['user_input'], event['user_name'], event['id'], reward_id=event['reward']['id'])
+        self.bridge.acknowledge_history(event['id'], self.client)
+        self.assertEqual(self.bridge.handle(message)['queued'], 0)
+        self.assertEqual(self.bridge.pending_history(), [])
+
 
 class NativeProtocolTests(unittest.TestCase):
     def test_utf8_round_trip(self):
