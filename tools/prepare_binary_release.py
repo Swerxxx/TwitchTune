@@ -9,6 +9,8 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from binary_updates import version_tuple,https_url,UNITS
 
+BROWSER_FILES = {'TwitchTuneBridge.exe', 'BROWSER_EXTENSION.md'}
+
 
 def validate_repository(repository):
     if not isinstance(repository,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+',repository) or repository.split('/')[1] in ('.','..'):
@@ -29,12 +31,21 @@ def package_build(folder,output,version,repository):
     if not (folder/'TwitchTune.exe').is_file() or not (folder/'_internal').is_dir():raise ValueError('Сначала собери Windows onedir-приложение.')
     info=dict(app='TwitchTune',version=version,updater=1)
     (folder/'release-info.json').write_text(json.dumps(info),encoding='utf-8')
-    if any(path.name not in UNITS for path in folder.iterdir()):raise ValueError('В папке сборки есть посторонние файлы.')
+    for path in folder.iterdir():
+        if path.name in UNITS:
+            continue
+        if path.name not in BROWSER_FILES or not path.is_file() or (folder/'_internal'/path.name).exists():
+            raise ValueError('В папке сборки есть посторонние файлы.')
     archive=output/'TwitchTune-Windows-x64.zip'
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as zipped:
         for path in sorted(folder.rglob('*')):
             if path.is_symlink():raise ValueError('Сборка содержит символьную ссылку.')
-            if path.is_file():zipped.write(path,'TwitchTune/'+str(path.relative_to(folder)).replace('\\','/'))
+            if path.is_file():
+                relative = path.relative_to(folder)
+                # Existing updaters only accept the original top-level release entries.
+                if path.parent == folder and path.name in BROWSER_FILES:
+                    relative = Path('_internal') / path.name
+                zipped.write(path, 'TwitchTune/' + relative.as_posix())
     digest=hashlib.sha256()
     with archive.open('rb') as stream:
         while chunk:=stream.read(1024*1024):digest.update(chunk)

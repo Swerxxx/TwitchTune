@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "TwitchTune · Заказы Twitch",
+  "version": "1.1.8",
+  "description": "Подтверждение конкретного заказа после прослушивания и оценки в TwitchTune.",
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.twitch.tv/popout/*/reward-queue*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.twitch.tv/popout/*/reward-queue*"
+      ],
+      "js": [
+        "matcher.js",
+        "content.js"
+      ]
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmSf+t2AQsRWlN4zGURTUIddkqQmKm5Kieqh6PxNcEx9N6U+m15s7q81JN0hvHQL6m8Z/cmLqRXkrGPSrRTuSgukK2VKr9H6FDVaOxvEQc/2ztcZMWjjLHZpYi8K4pHZSp3dYfizqJ7iqj7mLqw+YijipmBXo7/q3LBUxsL1ezm+861JiL573NPLID4Wp7XkbkLmQWJ7yGwzlKwlNzthjNzmAK/xFHkV2DbTEaFJzQ+r466HwYAmr06qOJPTk+WYVBQ+f/Xf5Pab1+RMJ3jp3mv50/5tHDM4c+aFaTiXDkqlOsp1UYC+XPsEoM64PqrJXhPBwBkpTSD9mwjIJiUbScwIDAQAB",
+  "background": {
+    "service_worker": "background.js"
+  }
+}

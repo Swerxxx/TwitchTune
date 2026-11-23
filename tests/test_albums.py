@@ -178,6 +178,29 @@ class AlbumCatalogTests(unittest.TestCase):
                 self.assertFalse(ydl.call_args.args[0]['noplaylist'])
                 self.assertTrue(ydl.call_args.args[0]['skip_download'])
 
+    def test_soundcloud_short_album_keeps_order_and_accepts_api_track_ids(self):
+        response = MagicMock(url='https://m.soundcloud.com/artist/sets/album?si=track')
+        response.__enter__.return_value = response
+        links = ['https://soundcloud.com/artist/first', 'https://api-v2.soundcloud.com/tracks/123']
+        with patch('soundcloud_download.requests.get', return_value=response) as redirect, patch('albums.YoutubeDL') as ydl:
+            extractor = ydl.return_value.__enter__.return_value
+            extractor.extract_info.return_value = dict(_type='playlist', title='Album',
+                entries=[dict(url=link) for link in links])
+            result = catalog('Альбом https://on.soundcloud.com/shareCode')
+        redirect.assert_called_once()
+        extractor.extract_info.assert_called_once_with('https://soundcloud.com/artist/sets/album', download=False)
+        self.assertEqual([track['url'] for track in result['tracks']], links)
+
+    def test_soundcloud_private_album_passes_the_secret_path_to_the_extractor(self):
+        link = 'https://soundcloud.com/artist/sets/album/s-Private'
+        with patch('albums.YoutubeDL') as ydl:
+            extract = ydl.return_value.__enter__.return_value.extract_info
+            extract.return_value = dict(_type='playlist', title='Album',
+                entries=[dict(url='https://api-v2.soundcloud.com/tracks/123?secret_token=s-Private')])
+            result = catalog(link + '?utm_source=clipboard')
+        extract.assert_called_once_with(link, download=False)
+        self.assertEqual(result['tracks'][0]['url'], 'https://api-v2.soundcloud.com/tracks/123?secret_token=s-Private')
+
 
 class AlbumDownloadTests(unittest.TestCase):
     def test_audio_and_cover_use_album_folder(self):

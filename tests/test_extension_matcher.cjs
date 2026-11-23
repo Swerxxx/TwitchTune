@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict');
+const {chooseOrder}=require('../assets/browser-extension/chromium/matcher.js');
+const task={id:'exact',viewer:'viewer',input:'https://youtu.be/a',rewardTitle:'Музыка'};
+const card={ids:['exact'],viewer:'Viewer',input:'https://youtu.be/a',reward:'Музыка'};
+assert.equal(chooseOrder(task,[card]).ok,true);
+assert.equal(chooseOrder(task,[{...card,ids:['other']}]).ok,false);
+assert.equal(chooseOrder(task,[card,card]).ok,false);
+assert.equal(chooseOrder(task,[{...card,viewer:'somebody'}]).ok,false);
+assert.equal(chooseOrder(task,[{...card,input:'https://youtu.be/other'}]).ok,false);
+assert.equal(chooseOrder(task,[{...card,reward:'Другая'}]).ok,false);
+assert.equal(chooseOrder(task,[{...card,ids:[]}]).ok,false);
+assert.equal(chooseOrder(task,[{...card,ids:['not-exact-prefix']}]).ok,false);
+assert.equal(chooseOrder(task,[{...card,ids:['exact','other']}]).ok,false);
+console.log('9 identity matching checks passed');

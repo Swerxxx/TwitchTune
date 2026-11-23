@@ -16,7 +16,9 @@ $units = @('TwitchTune.exe','_internal','release-info.json','run_debug.bat')
 $install = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 $stage = [IO.Path]::GetFullPath($StageDir).TrimEnd('\')
 $parent = [IO.Path]::GetDirectoryName($install)
-$backup = Join-Path $parent ('.TwitchTune-backup-'+[Guid]::NewGuid().ToString('N'))
+$DataDir = [IO.Path]::GetFullPath($DataDir)
+$backupRoot = Join-Path $DataDir 'update-backups'
+$backup = $null
 $updates = Join-Path $DataDir 'updates'
 [IO.Directory]::CreateDirectory($updates) | Out-Null
 $resultPath = Join-Path $updates 'last-result.json'
@@ -31,14 +33,30 @@ function Release-Lock {
         $script:lockStream.Dispose();$script:lockStream=$null
     }
 }
+function Reject-Link($path) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Update paths cannot be links.'
+    }
+}
+function Remove-Staging {
+    Reject-Link $stage
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+}
 try {
     if ($Version -notmatch '^\d+\.\d+\.\d+$') {throw 'Invalid version.'}
-    if ([IO.Path]::GetDirectoryName($stage) -ne $parent -or [IO.Path]::GetFileName($stage) -notlike '.TwitchTune-update-*') {throw 'Invalid staging directory.'}
+    if ($stage -eq $install -or [IO.Path]::GetDirectoryName($stage) -ne $parent -or [IO.Path]::GetFileName($stage) -notlike '.TwitchTune-update-*') {throw 'Invalid staging directory.'}
+    if ($DataDir.TrimEnd('\') -eq $stage -or $DataDir.StartsWith($stage+'\',[StringComparison]::OrdinalIgnoreCase)) {throw 'The profile cannot be inside the staging directory.'}
+    Reject-Link $stage
+    Reject-Link $install
+    Reject-Link $backupRoot
     if (-not (Test-Path (Join-Path $stage 'TwitchTune.exe'))) {throw 'The staged application is missing.'}
     if (-not (Test-Path (Join-Path $install 'TwitchTune.exe'))) {throw 'The installed application is missing.'}
     foreach ($name in $units) {
-        $path=Join-Path $install $name
-        if ((Test-Path $path) -and ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {throw 'Installation links cannot be safely replaced.'}
+        $path = Join-Path $install $name
+        Reject-Link $path
+        Reject-Link (Join-Path $stage $name)
+        if ($DataDir.TrimEnd('\') -eq $path -or $DataDir.StartsWith($path+'\',[StringComparison]::OrdinalIgnoreCase)) {throw 'The profile cannot be inside files managed by the updater.'}
     }
     if ($ReadyFile) {[IO.File]::WriteAllText($ReadyFile,'ready')}
     $old = Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue
@@ -50,12 +68,24 @@ try {
     if ($lockStream.Length -eq 0) {$lockStream.WriteByte(0);$lockStream.Flush()}
     $lockStream.Lock(0,1)
     $canRestart=$true
-    [IO.Directory]::CreateDirectory($backup) | Out-Null
-    foreach ($name in $units) {
+    $updateId = [Guid]::NewGuid().ToString('N')
+    $snapshot = Join-Path $backupRoot ([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-exe-'+$updateId)
+    $originals = Join-Path $stage ('.previous-'+$updateId)
+    $replacements = @($units | Where-Object {Test-Path -LiteralPath (Join-Path $stage $_)})
+    [IO.Directory]::CreateDirectory($snapshot) | Out-Null
+    # Copy first so a different drive for the profile does not affect the swap or rollback.
+    foreach ($name in $replacements) {
+        $destination = Join-Path $install $name
+        if (Test-Path -LiteralPath $destination) {
+            Copy-Item -LiteralPath $destination -Destination (Join-Path $snapshot $name) -Recurse -Force
+        }
+    }
+    $backup = $snapshot
+    [IO.Directory]::CreateDirectory($originals) | Out-Null
+    foreach ($name in $replacements) {
         $new=Join-Path $stage $name
-        if (-not (Test-Path $new)) {continue}
         $destination=Join-Path $install $name
-        if (Test-Path $destination) {Move-Item -LiteralPath $destination -Destination (Join-Path $backup $name)}
+        if (Test-Path -LiteralPath $destination) {Move-Item -LiteralPath $destination -Destination (Join-Path $originals $name)}
         $changed.Add($name)
         Move-Item -LiteralPath $new -Destination $destination
     }
@@ -69,7 +99,7 @@ try {
         if ((Test-Path $health) -and [IO.File]::ReadAllText($health).Trim() -eq $Version) {
             Write-Result 'installed' 'Update installed and application started.'
             Remove-Item -LiteralPath $health -Force
-            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Staging
             $job=[IO.Path]::GetDirectoryName($PSCommandPath)
             if ([IO.Path]::GetDirectoryName($job) -eq $updates -and [IO.Path]::GetFileName($job) -match '^[a-f0-9]{32}$') {
                 Remove-Item -LiteralPath (Join-Path $job 'package.zip') -Force -ErrorAction SilentlyContinue
@@ -93,12 +123,13 @@ try {
                 $lockStream.Lock(0,1)
             }
             for ($index=$changed.Count-1;$index -ge 0;$index--) {
-                $name=$changed[$index];$destination=Join-Path $install $name;$saved=Join-Path $backup $name
-                if (Test-Path $destination) {Remove-Item -LiteralPath $destination -Recurse -Force}
-                if (Test-Path $saved) {Move-Item -LiteralPath $saved -Destination $destination}
+                $name=$changed[$index];$destination=Join-Path $install $name;$saved=Join-Path $originals $name
+                if (Test-Path -LiteralPath $destination) {Move-Item -LiteralPath $destination -Destination (Join-Path $stage $name)}
+                if (Test-Path -LiteralPath $saved) {Move-Item -LiteralPath $saved -Destination $destination}
             }
         }
         Write-Result 'failed' ($failure+' Previous application files restored.')
+        if ($backup) {Remove-Staging}
     } catch {
         Write-Result 'failed' ($failure+' Automatic restoration failed; backup: '+$backup)
     } finally {Release-Lock}

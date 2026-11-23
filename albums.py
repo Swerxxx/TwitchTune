@@ -6,7 +6,9 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import requests
 from yt_dlp import YoutubeDL
-from core import parse_link
+from core import parse_link, soundcloud_share_link
+from soundcloud_download import canonical_soundcloud, resolve_soundcloud, SoundCloudError, failure_kind
+from yt_dlp.utils import DownloadError
 from source_metadata import yandex_record
 from spotify_support import EmbedData
 
@@ -25,7 +27,7 @@ def album_reference(text):
     match = re.fullmatch(r'/(?:intl-[a-z]+/)?album/([A-Za-z0-9]+)/?', p.path)
     if host == 'open.spotify.com' and match:
         return 'Spotify', 'https://open.spotify.com/album/' + match[1]
-    if host in ('soundcloud.com', 'm.soundcloud.com') and re.fullmatch(r'/[^/]+/sets/[^/]+/?', p.path):
+    if host in ('soundcloud.com', 'm.soundcloud.com') and re.fullmatch(r'/[^/]+/sets/[^/]+(?:/s-[\w-]+)?/?', p.path):
         return 'SoundCloud', 'https://soundcloud.com' + p.path.rstrip('/')
     if host in ('youtube.com', 'music.youtube.com', 'm.youtube.com') and p.path == '/playlist':
         ident = parse_qs(p.query).get('list', [''])[0]
@@ -34,13 +36,28 @@ def album_reference(text):
     return None
 
 
+def resolve_shared_soundcloud(url, cancelled=lambda: False):
+    if cancelled():
+        raise ValueError('Добавление альбома отменено.')
+    try:
+        target = canonical_soundcloud(url)
+    except (requests.RequestException, SoundCloudError, ValueError):
+        raise ValueError('Не удалось открыть короткую ссылку SoundCloud. Скопируй полный адрес из браузера.') from None
+    if cancelled():
+        raise ValueError('Добавление альбома отменено.')
+    reference = album_reference(target)
+    return reference[1] if reference else resolve_soundcloud(target)
+
+
 def catalog(text, cancelled=lambda: False, settings=None):
+    if cancelled():
+        raise ValueError('Добавление альбома отменено.')
+    if shared := soundcloud_share_link(text):
+        text = resolve_shared_soundcloud(shared, cancelled)
     reference = album_reference(text)
     if not reference:
         raise ValueError('Нужна ссылка на альбом Яндекса/Spotify, набор SoundCloud или плейлист YouTube.')
     source, url = reference
-    if cancelled():
-        raise ValueError('Добавление альбома отменено.')
     if source == 'Яндекс Музыка':
         ident = url.rsplit('/', 1)[-1]
         try:
@@ -119,7 +136,14 @@ def catalog(text, cancelled=lambda: False, settings=None):
         opts = options(soundcloud=source == 'SoundCloud')
         opts.update(noplaylist=False, extract_flat='in_playlist', skip_download=True, playlistend=101)
         with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            try:
+                info = ydl.extract_info(url, download=False)
+            except DownloadError as error:
+                if source != 'SoundCloud':
+                    raise
+                if failure_kind(error) == 'network':
+                    raise ValueError('SoundCloud не ответил при чтении альбома. Попробуй добавить его ещё раз.') from None
+                raise ValueError('Не удалось прочитать альбом SoundCloud. Проверь, открывается ли он по этой ссылке в браузере.') from None
             if not info or info.get('_type') not in ('playlist', 'multi_video'):
                 raise ValueError('Сервис не вернул список треков альбома.')
             tracks = []
@@ -129,6 +153,8 @@ def catalog(text, cancelled=lambda: False, settings=None):
                 if not row:
                     raise ValueError('В списке есть недоступная запись. Не удалось прочитать альбом целиком.')
                 link = row.get('webpage_url') or row.get('url') or ''
+                if source == 'SoundCloud':
+                    link = resolve_soundcloud(row.get('url') or link)
                 if source == 'YouTube' and not link.startswith('http'):
                     link = 'https://www.youtube.com/watch?v=' + str(row.get('id') or link)
                 parse_link(link)

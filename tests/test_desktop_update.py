@@ -41,6 +41,7 @@ class DesktopUpdateTests(unittest.TestCase):
         (self.target/'.venv').mkdir();(self.target/'.venv/python.exe').write_text('keep runtime')
         self.archive_with({'TwitchTune/queue.sqlite3':'do not install','TwitchTune/settings.json':'do not install'})
         backup=update_source(self.archive,self.target,self.data)
+        self.assertEqual(backup.parent, self.data/'update-backups')
         self.assertEqual((self.target/'app.py').read_text(),'new app.py')
         self.assertEqual((backup/'app.py').read_text(),'old app')
         self.assertEqual((self.data/'queue.sqlite3').read_bytes(),b'personal queue')
@@ -60,9 +61,16 @@ class DesktopUpdateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):update_source(self.archive,self.target,self.data)
                 self.assertEqual((self.target/'app.py').read_text(),'old app')
 
-    def test_existing_symlink_outside_installation_is_not_followed(self):
+    def test_existing_link_outside_installation_is_not_followed(self):
         outside=self.base/'outside';outside.mkdir()
-        (self.target/'assets').symlink_to(outside,target_is_directory=True)
+        link = self.target/'assets'
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            if getattr(error, 'winerror', None) != 1314:
+                raise
+            from _winapi import CreateJunction
+            CreateJunction(str(outside), str(link))
         self.archive_with()
         with self.assertRaises(ValueError):update_source(self.archive,self.target,self.data)
         self.assertFalse((outside/'icon.png').exists())

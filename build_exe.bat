@@ -19,8 +19,13 @@ py -m PyInstaller --noconfirm --clean --windowed --onedir --name TwitchTune ^
   --copy-metadata yt-dlp-yandex-music ^
   --collect-submodules keyring.backends ^
   --hidden-import websocket ^
+  --hidden-import socks ^
   --hidden-import requests app.py
 if errorlevel 1 goto :error
+py -m PyInstaller --noconfirm --clean --name TwitchTuneBridge --console --onefile browser_native_host.py
+if errorlevel 1 goto :error
+copy /Y dist\TwitchTuneBridge.exe dist\TwitchTune\TwitchTuneBridge.exe >nul
+copy /Y BROWSER_EXTENSION.md dist\TwitchTune\BROWSER_EXTENSION.md >nul
 copy /Y run_debug.bat dist\TwitchTune\run_debug.bat >nul
 echo.
 echo Done. Launch: dist\TwitchTune\TwitchTune.exe

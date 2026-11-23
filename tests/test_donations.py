@@ -179,6 +179,17 @@ class DonationCoreTests(unittest.TestCase):
         orders=allocate_orders(receipt,lambda _:album_metadata())
         self.assertEqual([o['url'] for o in orders],['https://youtu.be/one'])
 
+    def test_short_soundcloud_album_is_charged_for_every_track(self):
+        raw = raw_donation(amount=400, message='https://on.soundcloud.com/shareCode')
+        url = 'https://soundcloud.com/artist/sets/album'
+        metadata = dict(url=url, tracks=[{'url': 'first'}, {'url': 'second'}])
+        with patch('donations.resolve_shared_soundcloud', return_value=url):
+            receipt = priced_message('donationalerts', 'account', raw)
+            orders = allocate_orders(receipt, lambda _: metadata)
+            self.assertEqual([(order['url'], order['paid_tracks']) for order in orders], [(url, 2)])
+            receipt = priced_message('donationalerts', 'account', dict(raw, amount=200))
+            self.assertEqual(allocate_orders(receipt, lambda _: metadata), [])
+
     def test_receipt_expansion_is_atomic_and_cannot_be_repriced_on_replay(self):
         receipt=priced_message('donatex','account',raw_donation(amount=400,message='https://youtu.be/one https://youtu.be/two https://youtu.be/three'))
         self.assertTrue(self.store.record_donation(receipt))

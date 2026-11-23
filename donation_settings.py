@@ -3,7 +3,7 @@ import threading
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QPushButton,QGroupBox,QCheckBox,
                               QDialog,QTreeWidget,QTreeWidgetItem,QDialogButtonBox,QHeaderView,QSpinBox,QPlainTextEdit)
-from core import save_config
+from core import save_config, soundcloud_share_link
 from albums import album_reference,catalog
 from donation_clients import DonationClient
 from donation_auth import load_token,save_token,forget_token,authorize,REDIRECT
@@ -228,7 +228,7 @@ class DonationSettings(QWidget):
                     if not self.owner.closing:
                         store.donation_retry(key,'Не удалось проверить состав альбома. Повторим через минуту.')
                         self.owner.log.appendPlainText('Донат: не удалось проверить цену альбома. Повторим через минуту.')
-                if any(album_reference(url) for url in event['order_urls']):
+                if any(album_reference(url) or soundcloud_share_link(url) for url in event['order_urls']):
                     self.resolving.add(key);settings=dict(self.owner.cfg)
                     self.owner.run_async(lambda event=event,settings=settings:allocate_orders(event,lambda url:catalog(url,cancelled=lambda:self.owner.closing,settings=settings)),done,failed)
                 else:
@@ -241,8 +241,9 @@ class DonationSettings(QWidget):
                 store.donation_added(key,existing['id']);continue
             if len(store.rows('active'))>=100:break
             try:
-                if album_reference(event['url']):
-                    self.owner.import_album(event['url'],dict(viewer=event['viewer'],redemption=key,donation=event),metadata=event.get('album_metadata'))
+                if album_reference(event['url']) or soundcloud_share_link(event['url']):
+                    self.owner.import_album(event['url'],dict(viewer=event['viewer'],redemption=key,donation=event),
+                                            metadata=event.get('album_metadata'),allow_track=True)
                 else:
                     ident=store.add(event['url'],event['viewer'],redemption=key,donation=event)
                     store.donation_added(key,ident)

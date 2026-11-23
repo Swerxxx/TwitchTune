@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 import requests
 from mutagen.mp3 import MP3
 
@@ -20,6 +20,22 @@ AUTO_WINDOW = 30 * 60
 
 class TelegramError(RuntimeError):
     pass
+
+
+def normalize_telegram_proxy(value):
+    value = value.strip()
+    if not value:
+        return ''
+    try:
+        proxy = urlsplit(value)
+        if (proxy.scheme in ('http', 'https', 'socks5', 'socks5h') and proxy.hostname and proxy.port
+                and proxy.username is None and proxy.password is None and proxy.path in ('', '/')
+                and not proxy.query and not proxy.fragment and not any(char.isspace() for char in value)):
+            scheme = 'socks5h' if proxy.scheme == 'socks5' else proxy.scheme
+            return f'{scheme}://{proxy.netloc}'
+    except ValueError:
+        pass
+    raise TelegramError('Укажи прокси без логина и пароля, например socks5://127.0.0.1:1080.')
 
 
 def extract_mp3(message):
@@ -174,13 +190,15 @@ class TelegramInbox:
 
 
 class TelegramClient:
-    def __init__(self, token, chat_id, inbox, folder, emit, announce=True):
+    def __init__(self, token, chat_id, inbox, folder, emit, announce=True, *, proxy=''):
         if not re.fullmatch(r'\d+:[A-Za-z0-9_-]+', token.strip()):
             raise TelegramError('Неверный формат токена Telegram-бота.')
         self.token = token.strip()
         self.chat_id = str(chat_id).strip()
         self.inbox, self.folder, self.emit = inbox, Path(folder), emit
         self.announce = announce
+        proxy = normalize_telegram_proxy(proxy)
+        self.api_route = {'proxies': {'http': proxy, 'https': proxy}} if proxy else {}
         self.bot_id = None
         self.stop = threading.Event()
         self.thread = None
@@ -190,12 +208,12 @@ class TelegramClient:
         attempts = 2 if method in ('getMe', 'getWebhookInfo') else 1
         for attempt in range(attempts):
             try:
-                response = requests.post(url, json=params, timeout=(10, 25), allow_redirects=False)
+                response = requests.post(url, json=params, timeout=(10, 25), allow_redirects=False, **self.api_route)
                 break
             except requests.exceptions.SSLError:
                 raise TelegramError('Telegram: ошибка TLS. Проверь дату Windows и сертификат сетевого прокси.') from None
             except requests.exceptions.ProxyError:
-                raise TelegramError('Telegram: системный прокси не смог подключиться к api.telegram.org.') from None
+                raise TelegramError('Telegram: прокси не смог подключиться к api.telegram.org.') from None
             except (requests.Timeout, requests.ConnectionError) as error:
                 if attempt + 1 == attempts or self.stop.is_set():
                     reason = 'сервер не ответил вовремя' if isinstance(error, requests.Timeout) else 'не удалось установить соединение'
@@ -342,7 +360,7 @@ class TelegramClient:
             url = 'https://api.telegram.org/file/bot' + self.token + '/' + quote(path, safe='/')
             size = 0
             try:
-                with requests.get(url, stream=True, timeout=(10, 20), allow_redirects=False) as response:
+                with requests.get(url, stream=True, timeout=(10, 20), allow_redirects=False, **self.api_route) as response:
                     if response.status_code != 200:
                         raise TelegramError('Не удалось скачать MP3 из Telegram.')
                     with partial.open('wb') as output:

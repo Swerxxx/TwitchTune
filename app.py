@@ -5,7 +5,7 @@ from ratings import CRITERIA, calculate, details, score_label, summary as rating
 import traceback
 import keyring
 from pathlib import Path
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QPixmap, QDesktopServices
 from PySide6.QtCore import QObject, QUrl, Signal, Slot, QThread, QTimer, Qt, QSettings
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QComboBox,
@@ -14,17 +14,19 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QAudioBufferOutput
 from audio_visualizer import AudioWaves
 from local_audio import import_mp3
-from albums import album_reference, catalog, create_album
+from albums import album_reference, catalog, create_album, resolve_shared_soundcloud
 from album_window import AlbumsPanel
 from album_covers import load_album_cover
 from donation_settings import DonationSettings
 from binary_update_settings import BinaryUpdateSettings
-from core import QueueStore, load_config, save_config, telegram_request, telegram_delivery_note, parse_link
+from core import QueueStore, load_config, save_config, telegram_request, telegram_delivery_note, parse_link, soundcloud_share_link
 from media import Downloader, search, load_saved_cover
-from twitch import TwitchClient
+from twitch import TwitchClient, MANAGE_SCOPE
+from twitch_completion import TwitchCompletions
+from browser_bridge import BrowserBridge, register_native_host
 from theme import INTERFACE_STYLES, THEMES, normalize_interface_style, normalize_theme, stylesheet
 from visuals import HardwareSpeaker, Chassis, DeckDisplay, ElideLabel, TransportButton, QueueDelegate, ThemeCard
-from telegram_support import TelegramClient, TelegramError, TelegramInbox
+from telegram_support import TelegramClient, TelegramError, TelegramInbox, normalize_telegram_proxy
 from telegram_orders import TelegramOrders
 from lyrics import LyricsClient, song_query
 from lyrics_window import LyricsDialog, SoundCloudDescriptionDialog
@@ -194,7 +196,10 @@ class Main(QMainWindow):
         self.setMinimumSize(1040, 700)
         APP.mkdir(exist_ok=True)
         self.store = QueueStore(str(APP / 'queue.sqlite3'))
+        self.twitch_completions = TwitchCompletions(self.store)
+        self.completions_busy = False
         self.cfg = load_config(APP)
+        self.browser_bridge = BrowserBridge(APP)
         self.theme_key = normalize_theme(self.cfg.get('theme', 'green'))
         self.interface_style = normalize_interface_style(self.cfg.get('interface_style', self.cfg.get('button_style')))
         self.client = None
@@ -216,6 +221,14 @@ class Main(QMainWindow):
         self.reward_refresh_timer = QTimer(self)
         self.reward_refresh_timer.setInterval(30_000)
         self.reward_refresh_timer.timeout.connect(self.refresh_reward_catalog)
+        self.completion_timer = QTimer(self)
+        self.completion_timer.setInterval(30_000)
+        self.completion_timer.timeout.connect(self.flush_twitch_completions)
+        self.completion_timer.start()
+        self.bridge_timer = QTimer(self)
+        self.bridge_timer.setInterval(10_000)
+        self.bridge_timer.timeout.connect(self.browser_bridge_heartbeat)
+        self.bridge_timer.start()
         self.cover_attempts = set()
         self.displayed_cover = None
         self.jobs = []
@@ -386,6 +399,7 @@ class Main(QMainWindow):
         self.reward_refresh_button = self.button('Обновить', lambda: self.refresh_reward_catalog(manual=True), reward_line)
         self.reward_refresh_button.setToolTip('Загрузить награды Twitch и применить длительность, указанную в их названиях')
         self.reward_refresh_button.setEnabled(False)
+        self.button('Создать награду', self.create_twitch_reward, reward_line)
         center.addLayout(reward_line)
         self.tabs = QTabWidget()
         self.tabs.setObjectName('pages')
@@ -603,6 +617,7 @@ class Main(QMainWindow):
         actions = QHBoxLayout()
         self.button('Подключить бота', self.configure_private_bot, actions)
         self.button('Отключить', self.stop_private_bot, actions)
+        self.button('Прокси Telegram', self.configure_telegram_proxy, actions)
         bot_layout.addLayout(actions)
         background = QCheckBox('Оставлять TwitchTune и бота в трее при закрытии окна')
         background.setChecked(bool(self.cfg.get('telegram_keep_running')))
@@ -615,6 +630,23 @@ class Main(QMainWindow):
             autostart.toggled.connect(self.set_windows_startup)
             bot_layout.addWidget(autostart)
         content.addWidget(bot_box)
+        bridge_box = QGroupBox('Выполнение заказов Twitch · Расширение')
+        bridge_layout = QVBoxLayout(bridge_box)
+        hint = QLabel('Закрывает заказ после полного прослушивания и сохранения оценки. Работает с наградами, созданными на сайте Twitch.\n'
+                      'Нужны расширение и открытая очередь заказов. Если точный ID не найден, нажатия не будет.')
+        hint.setWordWrap(True); bridge_layout.addWidget(hint)
+        self.browser_completion_checkbox = QCheckBox('Подтверждать заказы через расширение браузера')
+        self.browser_completion_checkbox.setChecked(bool(self.cfg.get('browser_completion_enabled')))
+        self.browser_completion_checkbox.toggled.connect(self.set_browser_completion)
+        bridge_layout.addWidget(self.browser_completion_checkbox)
+        self.browser_picker = QComboBox()
+        for name, key in [('Firefox','firefox'),('Chrome','chrome'),('Edge','edge')]:
+            self.browser_picker.addItem(name,key)
+        bridge_layout.addWidget(self.browser_picker)
+        self.button('Подключить расширение',self.install_browser_bridge,bridge_layout)
+        self.button('Открыть файлы расширения',self.open_browser_extension,bridge_layout)
+        self.button('Открыть очередь Twitch',self.open_twitch_queue,bridge_layout)
+        content.addWidget(bridge_box)
         self.donation_settings=DonationSettings(self,APP)
         content.addWidget(self.donation_settings)
         self.build_yandex_settings(content)
@@ -1101,7 +1133,7 @@ class Main(QMainWindow):
                               self.incoming.emit('twitch', (client, kind, value)))
         return client
 
-    def connect_twitch(self):
+    def connect_twitch(self, force=False):
         cid = self.cfg.get('client_id')
         if not cid:
             cid, ok = QInputDialog.getText(self, 'Twitch Client ID', 'Вставь Client ID приложения Twitch (без секрета):')
@@ -1123,7 +1155,7 @@ class Main(QMainWindow):
         self.rewards.setEnabled(False)
         self.reward_settings_button.setEnabled(False)
         self.status.setText('Вход в Twitch…')
-        self.run_async(self.client.login, self.after_login, self.login_failed)
+        self.run_async((lambda: self.client.login(force=True)) if force else self.client.login, self.after_login, self.login_failed)
 
     def login_failed(self, error):
         self.login.setEnabled(True)
@@ -1140,6 +1172,9 @@ class Main(QMainWindow):
         self.status.setText(f"Вошёл как {info.get('login')}")
         self.login.setText('Переподключить Twitch')
         self.reward_refresh_timer.start()
+        self.twitch_completions.resume()
+        self.browser_bridge_heartbeat()
+        self.flush_twitch_completions()
         self.refresh_reward_catalog()
 
     def refresh_reward_catalog(self, manual=False):
@@ -1226,6 +1261,112 @@ class Main(QMainWindow):
             limit = guess_limit(reward['title'])
         self.activate_rewards({reward['id']: limit})
 
+    def browser_bridge_heartbeat(self):
+        if self.closing:
+            return
+        enabled = bool(self.cfg.get('browser_completion_enabled'))
+        self.browser_bridge.heartbeat(enabled, self.client)
+        user = (self.client.user or {}) if self.client else {}
+        if enabled and user.get('user_id') and user.get('login') and self.reward_catalog_loaded:
+            self.twitch_completions.adopt_browser_history(self.client, self.active_reward_limits)
+            self.import_browser_history()
+
+    def import_browser_history(self):
+        rewards = {reward['id']: reward for reward in self.available_rewards if reward['id'] in self.active_reward_limits}
+        for event in self.browser_bridge.pending_history():
+            reward = rewards.get(event['reward']['id'])
+            if reward is not None:
+                event['reward'] = reward
+                self.redeem(event)
+            else:
+                self.log.appendPlainText('Старая заявка пропущена: эта награда не выбрана в TwitchTune.')
+            self.browser_bridge.acknowledge_history(event['id'], self.client)
+
+    def set_browser_completion(self, enabled):
+        self.cfg['browser_completion_enabled'] = bool(enabled)
+        save_config(APP,self.cfg)
+        self.browser_bridge_heartbeat()
+        self.log.appendPlainText('Подтверждение через расширение включено.' if enabled else 'Подтверждение через расширение выключено.')
+
+    def install_browser_bridge(self):
+        try:
+            register_native_host(APP,self.browser_picker.currentData())
+            self.browser_bridge_heartbeat()
+            QMessageBox.information(self,'Расширение TwitchTune',
+                'Связь с браузером установлена. Открой файлы расширения и установи его по инструкции BROWSER_EXTENSION.md. Затем открой очередь Twitch и настрой карточку заказа.')
+        except (OSError,ValueError) as exc:
+            QMessageBox.warning(self,'Расширение TwitchTune',str(exc))
+
+    def open_browser_extension(self):
+        browser = 'firefox' if self.browser_picker.currentData()=='firefox' else 'chromium'
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(__file__).resolve().parent/'assets'/'browser-extension'/browser)))
+
+    def open_twitch_queue(self):
+        login = (self.client.user or {}).get('login','') if self.client else ''
+        if not login:
+            QMessageBox.information(self,'Очередь Twitch','Сначала подключи Twitch.')
+            return
+        import re
+        if re.fullmatch(r'[a-zA-Z0-9_]+',login):
+            QDesktopServices.openUrl(QUrl('https://www.twitch.tv/popout/'+login+'/reward-queue'))
+
+    def flush_twitch_completions(self):
+        if self.cfg.get('browser_completion_enabled'):
+            self.browser_bridge_heartbeat()
+            return
+        client = self.client
+        if not client or not client.user or not client.tokens or self.closing or self.completions_busy:
+            return
+        self.completions_busy = True
+        def done(messages):
+            self.completions_busy = False
+            for message in messages:
+                self.log.appendPlainText(message)
+        def failed(error):
+            self.completions_busy = False
+            self.log.appendPlainText('Подтверждение Twitch отложено: '+str(error))
+        self.run_async(lambda: self.twitch_completions.flush(client), done, failed)
+
+    def create_twitch_reward(self):
+        client = self.client
+        if not client or not client.user:
+            QMessageBox.information(self,'Награды Twitch','Сначала подключи Twitch.')
+            return
+        if MANAGE_SCOPE not in client.user.get('scopes', []):
+            QMessageBox.information(self,'Разрешение Twitch',
+                'Сейчас откроется Twitch. Разреши управление наградами, затем снова нажми «Создать награду».')
+            self.connect_twitch(force=True)
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Новая награда TwitchTune')
+        layout = QVBoxLayout(dialog)
+        hint = QLabel('Создаёт новую награду на подключённом канале. После полного прослушивания заказ будет отмечен выполненным.\n'
+                      'Старые награды на сайте Twitch останутся без изменений.')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        form = QFormLayout()
+        title = QLineEdit('Трек TwitchTune')
+        title.setMaxLength(45)
+        cost = QSpinBox(); cost.setRange(1,1_000_000_000); cost.setValue(1000)
+        minutes = QSpinBox(); minutes.setRange(1,90); minutes.setValue(15)
+        form.addRow('Название',title); form.addRow('Стоимость в баллах',cost); form.addRow('Лимит, минут',minutes)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText('Создать на Twitch')
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        name, points, seconds = title.text().strip(), cost.value(), minutes.value()*60
+        def done(reward):
+            saved = dict(self.cfg.get('reward_limits') or {})
+            saved[reward['id']] = seconds
+            self.cfg['reward_limits'] = saved
+            save_config(APP,self.cfg)
+            self.log.appendPlainText('Создана награда Twitch: '+reward['title'])
+            self.refresh_reward_catalog()
+        self.run_async(lambda: client.create_music_reward(name,points), done, self.async_error)
+
     def configure_rewards(self):
         if not self.available_rewards or not self.client:
             return
@@ -1297,6 +1438,9 @@ class Main(QMainWindow):
             return
         if not self.active_reward_limits and self.reward and reward_id != self.reward['id']:
             return
+        if self.client:
+            self.twitch_completions.bind(event, self.client.client_id,
+                                        (self.client.user or {}).get('user_id',''))
         if self.telegram_orders and not self.telegram_orders.stop.is_set():
             try:
                 code = telegram_request(event.get('user_input', ''))
@@ -1313,10 +1457,12 @@ class Main(QMainWindow):
         if TELEGRAM_PAUSED and telegram_delivery_note(event.get('user_input', '')):
             self.log.appendPlainText(f"Заявка от {event.get('user_name', 'зритель')}: пропущена — трек в Telegram.")
             return
-        if album_reference(event.get('user_input','')):
-            self.import_album(event.get('user_input',''),dict(viewer=event.get('user_name','зритель'),
+        text = event.get('user_input','')
+        if album_reference(text) or soundcloud_share_link(text):
+            self.import_album(text,dict(viewer=event.get('user_name','зритель'),
                 redemption=event.get('id'),viewer_id=event.get('user_id'),
-                max_duration=self.active_reward_limits.get(reward_id,MAX_TRACK_SECONDS),reward_title=event_reward.get('title',''),reward_id=reward_id))
+                max_duration=self.active_reward_limits.get(reward_id,MAX_TRACK_SECONDS),reward_title=event_reward.get('title',''),reward_id=reward_id),
+                allow_track=True)
             return
         try:
             ident = self.add_request(event.get('user_input', ''), event.get('user_name', 'зритель'),
@@ -1331,6 +1477,9 @@ class Main(QMainWindow):
         self.refresh()
 
     def redemption_updated(self,event):
+        if self.twitch_completions.remote_status(event):
+            if str(event.get('status','')).upper() == 'FULFILLED':
+                self.log.appendPlainText('Twitch подтвердил: заказ выполнен.')
         if str(event.get('status','')).lower() not in ('canceled','cancelled'):
             return
         redemption=event.get('id')
@@ -1371,8 +1520,9 @@ class Main(QMainWindow):
             self.review_id=parent['id']
             self.load_rating()
 
-    def import_album(self, url, request=None, metadata=None):
+    def import_album(self, url, request=None, metadata=None, *, allow_track=False):
         reward=bool(request)
+        shared = soundcloud_share_link(url)
         key=request.get('redemption') if request else None
         pending=getattr(self,'pending_albums',set())
         self.pending_albums=pending
@@ -1382,7 +1532,7 @@ class Main(QMainWindow):
         if not reward:
             self.album_importing=True
             self.albums_panel.import_button.setEnabled(False)
-            self.albums_panel.info.setText('Читаем список альбома…')
+            self.albums_panel.info.setText('Проверяем ссылку SoundCloud…' if shared else 'Читаем список альбома…')
         viewer=request.get('viewer','Вручную') if request else (self.viewer.text().strip() or 'Вручную')
         options={k:v for k,v in (request or {}).items() if k!='viewer'}
         def release():
@@ -1396,6 +1546,18 @@ class Main(QMainWindow):
             try:
                 if options.get('reward_id') in self.active_reward_limits:
                     options['max_duration'] = self.active_reward_limits[options['reward_id']]
+                if isinstance(metadata, str):
+                    ident = self.store.add(metadata, viewer, **options)
+                    if options.get('donation'):
+                        self.store.donation_added(key, ident)
+                    if ident:
+                        self.submit_request(ident)
+                        self.refresh()
+                        self.log.appendPlainText('Трек добавлен · ' + viewer)
+                    if not reward:
+                        self.url.clear()
+                        self.albums_panel.info.setText('Трек добавлен в очередь.')
+                    return
                 album,ids=create_album(self.store,APP/'Альбомы',metadata,viewer,**options)
                 if options.get('donation'):
                     parent=self.store.album_request(album) if album else None
@@ -1413,12 +1575,17 @@ class Main(QMainWindow):
         def failed(error):
             release()
             if options.get('donation'):self.store.donation_retry(key,str(error))
-            if reward:self.log.appendPlainText('Альбом отклонён: '+str(error))
+            if reward:self.log.appendPlainText(('Ссылка SoundCloud отклонена: ' if shared else 'Альбом отклонён: ') + str(error))
             else:
                 self.albums_panel.info.setText(str(error))
                 if not self.closing:QMessageBox.warning(self,'Альбом',str(error))
+        def load():
+            target = resolve_shared_soundcloud(shared, cancelled=lambda: self.closing) if shared and allow_track else url
+            if shared and allow_track and not album_reference(target):
+                return target
+            return catalog(target, cancelled=lambda: self.closing, settings=dict(self.cfg))
         if metadata is not None:done(metadata)
-        else:self.run_async(lambda:catalog(url,cancelled=lambda:self.closing,settings=dict(self.cfg)),done,failed)
+        else:self.run_async(load,done,failed)
 
     def retry_album(self, album):
         self.sync_request_reward_limits()
@@ -1501,8 +1668,9 @@ class Main(QMainWindow):
         self.run_async(work, done, failed)
 
     def add_manual(self):
-        if album_reference(self.url.text()):
-            self.import_album(self.url.text())
+        text = self.url.text()
+        if album_reference(text) or soundcloud_share_link(text):
+            self.import_album(text, allow_track=True)
             return
         try:
             ident = self.add_request(self.url.text(), self.viewer.text())
@@ -1670,6 +1838,27 @@ class Main(QMainWindow):
         self.exit_requested = True
         self.close()
 
+    def configure_telegram_proxy(self):
+        hint = ('Адрес HTTP или SOCKS5-прокси только для Telegram, например socks5://127.0.0.1:1080.\n'
+                'Пустое поле оставляет обычное подключение. Настройка применяется при следующем запуске бота.')
+        while True:
+            value, ok = QInputDialog.getText(self, 'Прокси Telegram', hint,
+                                             text=self.cfg.get('telegram_proxy', ''))
+            if not ok:
+                return
+            try:
+                proxy = normalize_telegram_proxy(value)
+            except TelegramError as exc:
+                QMessageBox.warning(self, 'Прокси Telegram', str(exc))
+                continue
+            break
+        try:
+            save_config(APP, self.cfg | {'telegram_proxy': proxy})
+        except OSError:
+            QMessageBox.warning(self, 'Прокси Telegram', 'Не удалось сохранить настройки TwitchTune.')
+            return
+        self.cfg['telegram_proxy'] = proxy
+
     def configure_private_bot(self):
         if self.telegram_orders and self.telegram_orders.thread.is_alive():
             QMessageBox.information(self, 'Telegram', 'Сначала отключи текущего бота и дождись остановки.')
@@ -1698,7 +1887,8 @@ class Main(QMainWindow):
         bot = TelegramOrders(token, self.cfg['client_id'], self.telegram_inbox, APP / 'tracks',
                              lambda status: self.incoming.emit('private_bot', (bot, status)),
                              lambda: self.telegram_reward_options,
-                             lambda: self.cfg.get('telegram_streamer_twitch_id'))
+                             lambda: self.cfg.get('telegram_streamer_twitch_id'),
+                             proxy=self.cfg.get('telegram_proxy', ''))
         self.telegram_orders = bot
         self.telegram_clients.append(bot)
         self.private_bot_status.setText('Подключение бота…')
@@ -1832,7 +2022,8 @@ class Main(QMainWindow):
                 info.setText('Сначала отключи Telegram во вкладке, затем запусти поиск чатов.')
                 return
             try:
-                client = TelegramClient(token.text(), '', self.telegram_inbox, APP / 'tracks', self.incoming.emit)
+                client = TelegramClient(token.text(), '', self.telegram_inbox, APP / 'tracks', self.incoming.emit,
+                                        proxy=self.cfg.get('telegram_proxy', ''))
                 find_button.setEnabled(False)
                 self.run_async(client.discover_chats, found, failed)
             except Exception as exc:
@@ -1845,7 +2036,8 @@ class Main(QMainWindow):
             if not value:
                 raise ValueError('Укажи ID или @имя Telegram-группы.')
             # Validate before changing the previous configuration.
-            client = TelegramClient(token.text(), value, self.telegram_inbox, APP / 'tracks', self.incoming.emit)
+            client = TelegramClient(token.text(), value, self.telegram_inbox, APP / 'tracks', self.incoming.emit,
+                                    proxy=self.cfg.get('telegram_proxy', ''))
             persisted = False
             try:
                 keyring.set_password('TwitchTune.Telegram', 'bot', token.text().strip())
@@ -1876,7 +2068,8 @@ class Main(QMainWindow):
         if self.telegram:
             self.telegram.close()
         client = TelegramClient(token, chat_id, self.telegram_inbox, APP / 'tracks',
-                                lambda kind, value: self.incoming.emit('telegram', (client, kind, value)), announce)
+                                lambda kind, value: self.incoming.emit('telegram', (client, kind, value)), announce,
+                                proxy=self.cfg.get('telegram_proxy', ''))
         self.telegram = client
         self.telegram_clients.append(client)
         self.telegram_status.setText('Подключение Telegram…')
@@ -1962,6 +2155,7 @@ class Main(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, 'Оценка трека', str(exc))
             return
+        self.flush_twitch_completions()
         self.refresh()
         self.log.appendPlainText(f"Сохранено: {row['viewer']} · {total}/66")
 
@@ -2208,6 +2402,8 @@ class Main(QMainWindow):
                 if index<len(tracks):
                     self.play_album_at(row['album_id'],index)
                     return
+            self.twitch_completions.listened(row, self.client)
+            self.flush_twitch_completions()
             self.finish_current('Прослушано',advance=False)
 
     def finish_current(self, status,advance=True):
@@ -2326,6 +2522,10 @@ class Main(QMainWindow):
         if not self.closing:
             self.closing = True
             self.reward_refresh_timer.stop()
+            self.completion_timer.stop()
+            self.bridge_timer.stop()
+            self.browser_bridge.heartbeat(False,self.client)
+            self.browser_bridge.close()
             if self.client:
                 self.client.close()
             for client in self.telegram_clients:
@@ -2341,6 +2541,7 @@ class Main(QMainWindow):
             return
         if self.background_tray is not None:
             self.background_tray.hide()
+        self.browser_bridge.close()
         super().closeEvent(event)
         if self.exit_requested and not self.isVisible():
             QApplication.quit()

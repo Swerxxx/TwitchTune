@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import QueueStore, telegram_request
-from telegram_support import TelegramInbox, TelegramClient, TelegramError, MAX_BYTES
+from telegram_support import TelegramInbox, TelegramClient, TelegramError, MAX_BYTES, normalize_telegram_proxy
 import requests
 
 
@@ -157,6 +157,33 @@ class TelegramTests(unittest.TestCase):
         self.assertEqual(row['status'], 'Готово')
         self.assertEqual(Path(row['path']).read_bytes(), b'mp3-bytes')
         self.assertEqual(self.inbox.get(file['code'])['status'], 'Готово')
+
+    def test_proxy_routes_bot_api_and_mp3_download(self):
+        client = TelegramClient('12345:SECRET', '-1001', self.inbox, self.folder.name, Mock(),
+                                proxy='socks5://127.0.0.1:1080')
+        client.bot_id = '12345'
+        file = self.file()
+        ident = self.order('в тг ' + file['code'])
+        self.inbox.match_pending('-1001', '12345')
+        response = Mock(status_code=200, ok=True)
+        response.json.return_value = {'ok': True, 'result': {'file_path': 'music/file.mp3'}}
+        with patch('telegram_support.requests.post', return_value=response) as post, \
+             patch('telegram_support.requests.get', return_value=self.response([b'mp3-bytes'])) as get, \
+             patch('telegram_support.MP3', return_value=SimpleNamespace(info=SimpleNamespace(length=120))):
+            client.process_downloads()
+        expected = dict.fromkeys(('http', 'https'), 'socks5h://127.0.0.1:1080')
+        self.assertEqual(post.call_args.kwargs['proxies'], expected)
+        self.assertEqual(get.call_args.kwargs['proxies'], expected)
+        self.assertEqual(self.store.get(ident)['status'], 'Готово')
+
+    def test_proxy_rejects_urls_with_credentials_or_non_proxy_paths(self):
+        self.assertEqual(normalize_telegram_proxy('  '), '')
+        self.assertEqual(normalize_telegram_proxy('http://[::1]:8080/'), 'http://[::1]:8080')
+        for value in ('http://user:secret@localhost:80', 'https://localhost:80/file',
+                      'socks4://localhost:1080', 'http://localhost:65536', 'http://localhost'):
+            with self.subTest(proxy=value), self.assertRaises(TelegramError) as error:
+                normalize_telegram_proxy(value)
+            self.assertNotIn('secret', str(error.exception))
 
     def test_corrupt_content_and_stream_limit_leave_no_partial(self):
         file, ident = self.download_setup()

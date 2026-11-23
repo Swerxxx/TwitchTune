@@ -36,6 +36,20 @@ class SoundCloudDownloadTests(unittest.TestCase):
         self.assertEqual(options(soundcloud=True)['socket_timeout'],45)
         self.assertEqual(options()['socket_timeout'],15)
 
+    def test_numeric_api_track_reaches_extractor_and_other_api_paths_are_rejected(self):
+        from core import parse_link
+        url = 'https://api-v2.soundcloud.com/tracks/123?secret_token=s-Private'
+        self.assertEqual(parse_link(url), (url, 'SoundCloud'))
+        ydl = Mock()
+        extract_soundcloud(ydl, url, download=True)
+        ydl.extract_info.assert_called_once_with(url, download=True, ie_key='Soundcloud')
+        for path in ('/playlists/123', '/tracks/123/stream', '/tracks/example'):
+            with self.subTest(path=path):
+                with self.assertRaises(ValueError):
+                    parse_link('https://api-v2.soundcloud.com' + path)
+                with self.assertRaises(SoundCloudError):
+                    resolve_soundcloud('https://api-v2.soundcloud.com' + path)
+
     def test_repeated_timeout_is_bounded_and_does_not_expose_raw_urls(self):
         ydl=Mock()
         ydl.extract_info.side_effect=RuntimeError('Read timed out PRIVATE_URL')

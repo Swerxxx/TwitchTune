@@ -161,6 +161,37 @@ class GeniusTests(unittest.TestCase):
             results=provider.search('Test Artist','Test Song')
         self.assertEqual(len(results),1);self.assertEqual(results[0]['source'],'Genius')
         self.assertEqual(fetch.call_count,2)
+    def test_russian_title_with_english_alias_and_collaborative_credits(self):
+        provider=GeniusProvider()
+        hit={'result':{'id':123,'title':'ЕСТЬ ОЩУЩЕНИЕ (THERE IS A FEELING)',
+             'primary_artist':{'name':'dekma'}, 'primary_artists':[{'name':'dekma'},{'name':'SHTRIHCOD'}],
+             'url':'https://genius.com/example-lyrics'}}
+        payload=json.dumps({'response':{'hits':[hit]}})
+        with patch.object(provider,'fetch',side_effect=[payload,'<div data-lyrics-container="true">Fixture text</div>']):
+            found=provider.search('SHTRIHCOD, dekma','ЕСТЬ ОЩУЩЕНИЕ')
+        self.assertEqual(len(found),1)
+        self.assertEqual(found[0]['plainLyrics'],'Fixture text')
+
+    def test_title_alias_does_not_accept_wrong_artist_or_remix_or_translation(self):
+        from lyrics_sources import genius_title_variants
+        provider=GeniusProvider()
+        def hit(title, artist):
+            return {'result':{'title':title,'primary_artist':{'name':artist},'url':'https://genius.com/example-lyrics'}}
+        hits=[hit('ЕСТЬ ОЩУЩЕНИЕ (THERE IS A FEELING)','Nobody'),
+              hit('ЕСТЬ ОЩУЩЕНИЕ (Remix)','dekma'),
+              hit('ЕСТЬ ОЩУЩЕНИЕ (English Translation)','dekma')]
+        with patch.object(provider,'fetch',return_value=json.dumps({'response':{'hits':hits}})) as fetch:
+            self.assertEqual(provider.search('dekma','ЕСТЬ ОЩУЩЕНИЕ'),[])
+        fetch.assert_called_once()
+        self.assertEqual(len(genius_title_variants('ЕСТЬ ОЩУЩЕНИЕ (Remix)')),1)
+
+    def test_collaboration_order_and_artist_names_field(self):
+        from lyrics_sources import genius_artist_score
+        record={'primary_artist':{'name':'dekma'},'artist_names':'dekma & SHTRIHCOD'}
+        self.assertEqual(genius_artist_score('SHTRIHCOD, dekma',record)[0],1)
+        self.assertLess(genius_artist_score('Nobody',record)[0],.65)
+        self.assertLess(genius_artist_score('dekma, SHTRIHCOD',{'primary_artist':{'name':'dekma'}})[0],.65)
+
     def test_failed_first_page_tries_second(self):
         provider=GeniusProvider()
         hit={'result':{'title':'Test Song','primary_artist':{'name':'Test Artist'},'url':'https://genius.com/test-song-lyrics'}}

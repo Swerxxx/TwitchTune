@@ -43,16 +43,17 @@ class TelegramOrderTests(unittest.TestCase):
         self.callback('login')
         self.assertEqual(self.bot.account('99')['twitch'], twitch_id)
 
-    def upload(self):
+    def upload(self, *, expected_proxies=None):
         self.bot.api.return_value = {'file_path': 'music/file.mp3'}
         fixture = (Path(__file__).parent / 'fixtures' / 'silence-6s.mp3').read_bytes()
         response = Mock(status_code=200)
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
         response.iter_content.return_value = [fixture]
-        with patch('telegram_orders.requests.get', return_value=response):
+        with patch('telegram_orders.requests.get', return_value=response) as get:
             self.message(audio={'file_id': 'file', 'file_name': 'Test.mp3', 'duration': 999,
                                 'file_size': len(fixture)})
+        self.assertEqual(get.call_args.kwargs.get('proxies'), expected_proxies)
         return self.bot.pending('99')
 
     def reward(self, tier='short', user='42', ident='reward'):
@@ -142,6 +143,23 @@ class TelegramOrderTests(unittest.TestCase):
         commands = self.bot.api.call_args_list[0].kwargs['commands']
         self.assertEqual([row['command'] for row in commands],
                          ['start', 'profile', 'pending', 'cancel', 'unlink', 'help', 'streamer'])
+
+    def test_private_bot_proxy_routes_download_and_avatar_but_not_twitch_login(self):
+        proxy = 'http://127.0.0.1:8080'
+        self.bot = TelegramOrders('12345:test', 'client', self.bot.inbox, self.bot.folder,
+                                  Mock(), self.bot.rewards, proxy=proxy)
+        self.bot.send = Mock()
+        self.bot.api = Mock()
+        response = Mock(ok=True)
+        response.json.return_value = {'ok': True}
+        with patch('telegram_orders.requests.post', return_value=response) as post:
+            self.bot.apply_appearance()
+            expected = dict.fromkeys(('http', 'https'), proxy)
+            self.assertEqual(post.call_args.kwargs['proxies'], expected)
+            self.bot.twitch_json('/device', data={'client_id': 'client'})
+            self.assertNotIn('proxies', post.call_args.kwargs)
+        self.authorize()
+        self.assertIsNotNone(self.upload(expected_proxies=expected))
 
     def test_only_channel_owner_gets_validated_mp3_and_delivery_is_not_repeated(self):
         self.authorize()

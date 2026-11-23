@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 DOMAINS = {
     'YouTube': ('youtube.com', 'youtu.be', 'music.youtube.com'),
-    'SoundCloud': ('soundcloud.com', 'on.soundcloud.com', 'm.soundcloud.com'),
+    'SoundCloud': ('soundcloud.com', 'on.soundcloud.com', 'm.soundcloud.com', 'api-v2.soundcloud.com'),
     'Яндекс Музыка': ('music.yandex.ru', 'music.yandex.com', 'music.yandex.kz', 'music.yandex.by', 'music.yandex.uz'),
     'Spotify': ('open.spotify.com',),
     'VK': ('vk.com', 'vk.ru', 'vkvideo.ru', 'm.vk.com', 'm.vk.ru'),
@@ -50,6 +50,8 @@ def parse_link(text):
     host = (p.hostname or '').lower().removeprefix('www.')
     for source, hosts in DOMAINS.items():
         if host in hosts:
+            if host == 'api-v2.soundcloud.com' and not re.fullmatch(r'/tracks/[0-9]+/?', p.path):
+                raise ValueError('SoundCloud: ожидается ссылка на один трек.')
             if source == 'Spotify' and not re.fullmatch(r'/(?:intl-[a-z]+/)?track/[A-Za-z0-9]+/?', p.path):
                 raise ValueError('Spotify: нужна ссылка open.spotify.com/track/…, не альбом или плейлист.')
             if source == 'YouTube' and p.path in ('/playlist', '/channel', '/feed'):
@@ -58,6 +60,15 @@ def parse_link(text):
                 raise ValueError('Яндекс Музыка: нужна ссылка на один трек, не альбом или плейлист.')
             return url, source
     raise ValueError('Поддерживаются ссылки YouTube, SoundCloud, Яндекс Музыки, Spotify и VK.')
+
+
+def soundcloud_share_link(text):
+    try:
+        url, source = parse_link(text)
+    except ValueError:
+        return None
+    if source == 'SoundCloud' and urlparse(url).hostname == 'on.soundcloud.com':
+        return url
 
 class QueueStore:
     def __init__(self, path):

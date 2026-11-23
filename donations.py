@@ -3,8 +3,8 @@ import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from albums import album_reference
-from core import parse_link, telegram_delivery_note
+from albums import album_reference, resolve_shared_soundcloud
+from core import parse_link, telegram_delivery_note, soundcloud_share_link
 
 PROVIDERS={'donationalerts':'DonationAlerts','donatex':'DonateX'}
 
@@ -102,6 +102,8 @@ def allocate_orders(receipt,album_loader=None):
     for index,url in enumerate(receipt['order_urls'],1):
         if remaining<=0:break
         metadata=None;count=1
+        if shared := soundcloud_share_link(url):
+            url = resolve_shared_soundcloud(shared)
         if album_reference(url):
             if album_loader is None:raise ValueError('Нужно прочитать состав альбома.')
             metadata=album_loader(url)

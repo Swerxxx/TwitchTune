@@ -52,6 +52,45 @@ def genius_url(url):
     return url if parsed.scheme=='https' and parsed.hostname in ('genius.com','www.genius.com') and not parsed.username and not parsed.password and parsed.path.endswith('-lyrics') else ''
 
 
+# Genius often adds an English title in parentheses to a Russian original.
+# Keep performance/version labels: a translated title is not a translated song.
+GENIUS_VERSIONS = {'live','remix','cover','slowed','sped','translation','перевод','ремикс',
+                  'instrumental','acoustic','караоке','кавер'}
+
+
+def genius_title_variants(title):
+    variants = [normalized(title)]
+    match = re.fullmatch(r'(.+?)\s*[([]([^()\[\]]+)[)\]]', title.strip())
+    if match:
+        base, alias = match.groups()
+        if (re.search(r'[А-Яа-яЁё]', base) and re.search(r'[A-Za-z]', alias) and
+                not re.search(r'[А-Яа-яЁё]', alias) and
+                not set(normalized(alias).split()) & GENIUS_VERSIONS):
+            variants.append(normalized(base))
+    return variants
+
+
+def genius_artist_score(artist, record):
+    names = []
+    primary = record.get('primary_artist')
+    if isinstance(primary, dict) and isinstance(primary.get('name'), str):
+        names.append(primary['name'])
+    for field in ('primary_artists', 'featured_artists'):
+        people = record.get(field)
+        if isinstance(people, list):
+            names.extend(p['name'] for p in people if isinstance(p, dict) and isinstance(p.get('name'), str))
+    if isinstance(record.get('artist_names'), str):
+        names.append(record['artist_names'])
+    expected = normalized(artist)
+    score = max((SequenceMatcher(None, expected, normalized(name)).ratio() for name in names), default=0)
+    def tokens(value):
+        return set(normalized(value).split()) - {'and', 'feat', 'ft', 'featuring', 'with', 'и'}
+    requested, credited = tokens(artist), tokens(' '.join(names))
+    if requested and requested <= credited:
+        score = 1
+    return (score if artist else 1), ', '.join(dict.fromkeys(names))
+
+
 class GeniusProvider:
     def __init__(self):self.blocked_until=0
     def fetch(self,url,params=None,cancelled=lambda:False):
@@ -103,15 +142,15 @@ class GeniusProvider:
         for hit in hits[:10]:
             record=hit.get('result',{}) if isinstance(hit,dict) else {}
             if not isinstance(record,dict):continue
-            primary=record.get('primary_artist') or {}
-            name,performer=record.get('title',''),primary.get('name','') if isinstance(primary,dict) else ''
+            name = record.get('title', '')
+            artist_match, performer = genius_artist_score(artist, record)
             url=genius_url(record.get('url'))
             if not url or not isinstance(name,str) or not isinstance(performer,str):continue
-            similarity=SequenceMatcher(None,normalized(title),normalized(name)).ratio()
-            artist_match=SequenceMatcher(None,normalized(artist),normalized(performer)).ratio() if artist else 1
+            similarity=max(SequenceMatcher(None, query, candidate).ratio()
+                           for query in genius_title_variants(title) for candidate in genius_title_variants(name))
             if similarity<.72 or artist_match<.65:continue
             # Alternate live/remix/translation versions are not a match for the original.
-            versions={'live','remix','cover','slowed','sped','translation','перевод','ремикс'}
+            versions=GENIUS_VERSIONS
             if (set(normalized(name).split()) & versions)!=(set(normalized(title).split()) & versions):continue
             candidates.append((similarity+artist_match,record,name,performer,url))
         results=[]

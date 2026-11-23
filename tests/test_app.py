@@ -460,6 +460,33 @@ class AppTests(unittest.TestCase):
         self.assertEqual(self.window.store.albums(),[])
         self.assertEqual(self.window.down.submitted,[])
 
+    def test_soundcloud_short_links_preserve_twitch_album_and_single_track_orders(self):
+        from test_albums import album_metadata
+        short_album = 'https://on.soundcloud.com/albumCode'
+        short_track = 'https://on.soundcloud.com/trackCode'
+        album_url = 'https://soundcloud.com/artist/sets/album'
+        track_url = 'https://soundcloud.com/artist/track'
+        api_track = 'https://api-v2.soundcloud.com/tracks/123'
+        album = dict(album_metadata(), url=album_url, source='SoundCloud',
+                     tracks=[dict(url=api_track, title='One')])
+        targets = {short_album: album_url, short_track: track_url}
+        with patch.object(module, 'resolve_shared_soundcloud', side_effect=lambda url, **_: targets[url]), \
+                patch.object(module, 'catalog', return_value=album) as loader:
+            self.window.redeem(dict(id='album', user_input=short_album, user_id='123', user_name='Viewer'))
+            self.window.redeem(dict(id='track', user_input=short_track, user_id='123', user_name='Viewer'))
+            deadline = time.monotonic() + 4
+            while self.window.jobs and time.monotonic() < deadline:
+                self.application.processEvents()
+        loader.assert_called_once()
+        self.assertEqual(loader.call_args.args[0], album_url)
+        parent = self.window.store.get_redemption('album')
+        track = self.window.store.get_redemption('track')
+        self.assertEqual(parent['source'], 'Альбом')
+        self.assertEqual(track['url'], track_url)
+        children = self.window.store.album_tracks(parent['album_id'])
+        self.assertEqual([row['url'] for row in children], [api_track])
+        self.assertCountEqual(self.window.down.submitted, [children[0]['id'], track['id']])
+
     def test_last_song_ends_and_skip_does_not_repeat_it(self):
         ident = self.ready()
         self.window.next_track()
@@ -725,6 +752,17 @@ class AppTests(unittest.TestCase):
             self.window.configure_telegram()
         network.assert_not_called()
 
+    def test_telegram_proxy_saved_and_used_at_next_start(self):
+        self.window.cfg['client_id'] = 'client'
+        with patch('app.QInputDialog.getText', return_value=('socks5://127.0.0.1:1080', True)):
+            self.window.configure_telegram_proxy()
+        saved = module.load_config(Path(self.folder.name))
+        self.assertEqual(saved['telegram_proxy'], 'socks5h://127.0.0.1:1080')
+        with patch('app.TelegramOrders') as bot:
+            bot.return_value.thread = None
+            self.window.start_private_bot('12345:test')
+        self.assertEqual(bot.call_args.kwargs['proxy'], saved['telegram_proxy'])
+
     def test_telegram_is_paused_hidden_and_never_autoconnects(self):
         self.assertTrue(module.TELEGRAM_PAUSED)
         self.assertFalse(self.window.tabs.isTabVisible(5))
@@ -781,6 +819,41 @@ class AppTests(unittest.TestCase):
         self.window.playback_changed(QMediaPlayer.PausedState)
         self.assertFalse(self.window.play.playing)
         self.assertFalse(self.window.deck.timer.isActive())
+
+    def test_album_twitch_completion_waits_for_last_track(self):
+        from test_albums import album_metadata
+        album, ids=self.window.store.add_album(album_metadata(),Path(self.folder.name)/'album',
+                                               redemption='album-request',reward_id='reward')
+        parent=self.window.store.album_request(album)
+        self.window.twitch_completions.bind(dict(id='album-request',reward={'id':'reward'},broadcaster_user_id='channel'),'app')
+        self.window.current=parent['id']; self.window.album_track_index=0
+        with patch.object(self.window,'play_album_at') as next_track:
+            self.window.media_status(QMediaPlayer.EndOfMedia)
+            next_track.assert_called_once_with(album,1)
+        state=lambda:self.window.store.db.execute("SELECT state FROM twitch_completions WHERE redemption='album-request'").fetchone()[0]
+        self.assertEqual(state(),'waiting')
+        self.window.album_track_index=1
+        self.window.media_status(QMediaPlayer.EndOfMedia)
+        self.assertEqual(state(),'awaiting_rating')
+
+    def test_natural_end_waits_for_rating_and_skip_does_not_fulfill(self):
+        ident=self.ready()
+        self.window.store.db.execute("UPDATE queue SET redemption='request',reward_id='reward' WHERE id=?",(ident,))
+        self.window.store.db.commit()
+        self.window.twitch_completions.bind(dict(id='request',reward={'id':'reward'},broadcaster_user_id='channel'),'app')
+        self.window.play_row(self.window.store.get(ident))
+        self.window.media_status(QMediaPlayer.EndOfMedia)
+        state=self.window.store.db.execute("SELECT state FROM twitch_completions WHERE redemption='request'").fetchone()[0]
+        self.assertEqual(state,'awaiting_rating')
+        self.assertEqual(self.window.store.get(ident)['status'],'Ждёт оценки')
+        self.assertIsNone(self.window.current)
+        other=self.ready()
+        self.window.store.db.execute("UPDATE queue SET redemption='skipped',reward_id='reward' WHERE id=?",(other,))
+        self.window.store.db.commit()
+        self.window.twitch_completions.bind(dict(id='skipped',reward={'id':'reward'},broadcaster_user_id='channel'),'app')
+        self.window.play_row(self.window.store.get(other))
+        self.window.skip_current()
+        self.assertEqual(self.window.store.db.execute("SELECT state FROM twitch_completions WHERE redemption='skipped'").fetchone()[0],'waiting')
 
     def test_settings_palettes_apply_without_interrupting_playback(self):
         from theme import THEMES

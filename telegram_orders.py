@@ -40,8 +40,8 @@ def eligible_rewards(rewards, duration):
 
 
 class TelegramOrders(TelegramClient):
-    def __init__(self, token, client_id, inbox, folder, emit, rewards, streamer_id=lambda: None):
-        super().__init__(token, '', inbox, folder, emit)
+    def __init__(self, token, client_id, inbox, folder, emit, rewards, streamer_id=lambda: None, *, proxy=''):
+        super().__init__(token, '', inbox, folder, emit, proxy=proxy)
         if not re.fullmatch(r'[a-zA-Z0-9]+', client_id):
             raise TelegramError('Укажи Client ID публичного приложения Twitch.')
         self.client_id = client_id
@@ -157,7 +157,7 @@ class TelegramOrders(TelegramClient):
                 'https://api.telegram.org/bot' + self.token + '/setMyProfilePhoto',
                 data={'photo': json.dumps({'type': 'static', 'photo': 'attach://avatar'})},
                 files={'avatar': ('twitchtune.jpg', bytes(buffer.data()), 'image/jpeg')},
-                timeout=(5, 15), allow_redirects=False,
+                timeout=(5, 15), allow_redirects=False, **self.api_route,
             )
             uploaded = response.ok and response.json().get('ok')
         except (requests.RequestException, ValueError):
@@ -429,7 +429,7 @@ class TelegramOrders(TelegramClient):
                 raise ValueError('Telegram не смог выдать MP3 размером до 20 МБ.')
             url = 'https://api.telegram.org/file/bot' + self.token + '/' + quote(path, safe='/')
             try:
-                with requests.get(url, stream=True, timeout=(5, 12), allow_redirects=False) as response:
+                with requests.get(url, stream=True, timeout=(5, 12), allow_redirects=False, **self.api_route) as response:
                     if response.status_code != 200:
                         raise ValueError('Telegram не отдал MP3. Пришли файл ещё раз.')
                     size = 0

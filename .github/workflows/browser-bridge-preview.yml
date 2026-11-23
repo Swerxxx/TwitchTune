@@ -1,0 +1,115 @@
+name: Browser bridge preview
+on:
+  push:
+    branches: [browser-queue-preview]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  PREVIEW_ARCHIVE: TwitchTune-1.1.8-Browser-History-Test-Windows-x64.zip
+  PREVIEW_ARTIFACT: TwitchTune-1.1.8-Browser-History-Test
+  PREVIEW_TAG: browser-preview-1.1.8-history.1
+jobs:
+  preview:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt 'pyinstaller>=6,<7'
+          if ($LASTEXITCODE -ne 0) { throw 'Python dependencies failed.' }
+          npm install --prefix .preview-tools playwright
+          if ($LASTEXITCODE -ne 0) { throw 'Browser test dependencies failed.' }
+          ./.preview-tools/node_modules/.bin/playwright.cmd install chromium
+          if ($LASTEXITCODE -ne 0) { throw 'Browser installation failed.' }
+      - name: Python regression checks
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_AUDIO_BACKEND: windows
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Python tests failed.' }
+      - name: Offline browser adapter checks
+        shell: pwsh
+        run: |
+          $env:NODE_PATH = Join-Path $pwd '.preview-tools/node_modules'
+          node tests/test_extension_matcher.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Identity matching checks failed.' }
+          node tests/browser_extension_dom.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Synthetic DOM checks failed.' }
+      - name: Build application and native messaging host
+        shell: pwsh
+        run: |
+          ./build_exe.ps1 -Python python
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
+      - name: Verify compiled application starts
+        shell: pwsh
+        run: |
+          $profile = Join-Path $env:RUNNER_TEMP 'TwitchTune-browser-preview-smoke'
+          New-Item -ItemType Directory -Force -Path "$profile/updates" | Out-Null
+          $env:TWITCHTUNE_PROFILE_DIR=$profile
+          $env:QT_QPA_PLATFORM='offscreen'
+          $health=Join-Path $profile 'updates/startup.ready'
+          $process=Start-Process -FilePath './dist/TwitchTune/TwitchTune.exe' -ArgumentList '--smoke-test','--update-health-file',"`"$health`"" -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $health)) { throw 'Application failed to start.' }
+          if (-not (Test-Path './dist/TwitchTune/TwitchTuneBridge.exe')) { throw 'Native bridge is missing.' }
+          python tools/smoke_browser_host.py './dist/TwitchTune/TwitchTuneBridge.exe'
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled native host check failed.' }
+      - name: Package Windows preview
+        shell: pwsh
+        run: |
+          python -m zipfile -c "$env:PREVIEW_ARCHIVE" dist/TwitchTune
+          if ($LASTEXITCODE -ne 0) { throw 'Preview packaging failed.' }
+          python -c "import sys; from zipfile import ZipFile; archive=ZipFile(sys.argv[1]); assert archive.testzip() is None; assert 'TwitchTune/TwitchTune.exe' in archive.namelist()" "$env:PREVIEW_ARCHIVE"
+          if ($LASTEXITCODE -ne 0) { throw 'Preview archive validation failed.' }
+      - name: Upload preview archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PREVIEW_ARTIFACT }}
+          path: ${{ env.PREVIEW_ARCHIVE }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/browser-queue-preview'
+    needs: preview
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.PREVIEW_ARTIFACT }}
+      - name: Publish Windows prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Preview $PREVIEW_TAG is already published."
+            exit 0
+          fi
+          cat > preview-notes.md <<'EOF'
+          Тестовая сборка TwitchTune для Windows x64 с поддержкой старых заказов Twitch.
+
+          - Уже прослушанные и оценённые заказы из сохранённой очереди TwitchTune можно подтвердить по точному ID.
+          - Кнопка «Импортировать старые заказы» переносит заявки с открытой страницы Twitch. TwitchTune принимает заявки по выбранным в программе наградам. Повторный импорт сохраняет одну запись на заказ.
+          - Автоподтверждение срабатывает после прослушивания и оценки. TwitchTune отмечает завершение после подтверждения от Twitch.
+
+          Сценарии проверены на тестовой очереди. Импорт зависит от того, доступны ли точные ID заказа и награды на странице Twitch.
+
+          Распакуйте весь ZIP и запустите `TwitchTune.exe`. Инструкция по временному подключению Firefox находится в `BROWSER_EXTENSION.md`.
+          EOF
+          gh release create "$PREVIEW_TAG" "$PREVIEW_ARCHIVE" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title 'TwitchTune 1.1.8 Browser Preview 2 — старые заказы' --notes-file preview-notes.md

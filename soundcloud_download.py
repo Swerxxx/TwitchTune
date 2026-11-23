@@ -32,17 +32,28 @@ def failure_kind(error):
     return 'other'
 
 
-def resolve_soundcloud(url):
+def canonical_soundcloud(url):
     parsed = urlparse(url)
     if parsed.hostname == 'on.soundcloud.com':
         # A share code is not a /artist/track path. Resolve its redirect first.
         with requests.get(url, stream=True, allow_redirects=True, timeout=(10,45)) as response:
             response.raise_for_status()
             parsed = urlparse(response.url)
-    if parsed.scheme not in ('https','http') or parsed.hostname not in ('soundcloud.com','www.soundcloud.com','m.soundcloud.com') or parsed.username or parsed.password:
-        raise SoundCloudError('Короткая ссылка SoundCloud не раскрылась в ссылку на трек. Открой её в браузере и скопируй полный адрес soundcloud.com/исполнитель/трек.')
+    host = parsed.hostname
+    if (parsed.scheme not in ('https', 'http') or parsed.username or parsed.password
+            or parsed.port not in (None, 80, 443)):
+        raise SoundCloudError('Недопустимый адрес SoundCloud.')
+    if host in ('www.soundcloud.com', 'm.soundcloud.com'):
+        host = 'soundcloud.com'
+    if (host != 'soundcloud.com'
+            and not (host == 'api-v2.soundcloud.com' and re.fullmatch(r'/tracks/[0-9]+/?', parsed.path))):
+        raise SoundCloudError('Ссылка не ведёт на поддерживаемую страницу SoundCloud.')
     query = [(k,v) for k,v in parse_qsl(parsed.query,keep_blank_values=True) if not k.startswith('utm_') and k != 'si']
-    canonical = urlunparse(('https','soundcloud.com',parsed.path,'',urlencode(query),''))
+    return urlunparse(('https', host, parsed.path.rstrip('/'), '', urlencode(query), ''))
+
+
+def resolve_soundcloud(url):
+    canonical = canonical_soundcloud(url)
     if not SoundcloudIE.suitable(canonical):
         raise SoundCloudError('Нужна ссылка на отдельный трек SoundCloud. Открой песню в браузере и скопируй полный адрес soundcloud.com/исполнитель/трек.')
     return canonical
