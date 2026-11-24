@@ -565,7 +565,7 @@ class TelegramOrders(TelegramClient):
         except ValueError as exc:
             self.send(chat, str(exc))
 
-    def accept_reward(self, event, code):
+    def accept_reward(self, event, code, *, reward_priority=False):
         redemption = event.get('id')
         twitch_id = str(event.get('user_id') or '')
         reward_id = event.get('reward', {}).get('id')
@@ -594,7 +594,8 @@ class TelegramOrders(TelegramClient):
                     raise ValueError('MP3 отсутствует. Отмени подготовку и пришли файл заново.')
                 ident = self.store.add_telegram_mp3(
                     dict(order) | {'path': str(path)}, event.get('user_name') or twitch_id,
-                    redemption, selected[0], selected[2])
+                    redemption, selected[0], selected[2], reward_id=reward_id,
+                    reward_priority=reward_priority)
             except ValueError as exc:
                 self.notices.put((order['telegram'], 'Заявка не добавлена. ' + str(exc)))
                 raise

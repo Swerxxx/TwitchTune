@@ -78,13 +78,14 @@ class DurationControl(QWidget):
 
 
 class RewardDialog(QDialog):
-    def __init__(self, rewards, selected, parent=None):
+    def __init__(self, rewards, selected, parent=None, *, priority_ids=()):
         super().__init__(parent)
         self.setWindowTitle('TwitchTune · Музыкальные награды')
         self.setObjectName('rewardDialog')
         self.resize(780, 660)
         self.setMinimumSize(640, 460)
         self.controls = {}
+        self.priority_checks = {}
         self.cards = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 20)
@@ -103,7 +104,8 @@ class RewardDialog(QDialog):
         badge.setAlignment(Qt.AlignCenter)
         header.addWidget(badge)
         layout.addLayout(header)
-        hint = QLabel('Выбери награды для заказа музыки и задай лимит каждой.\nВсе выбранные награды принимаются одновременно.')
+        hint = QLabel('Выбери награды для заказа музыки и задай лимит каждой.\n'
+                      'Новые заказы с галочкой «Приоритет» идут после донатов и VIP, перед обычными заказами за баллы.')
         hint.setWordWrap(True)
         hint.setObjectName('muted')
         layout.addWidget(hint)
@@ -149,6 +151,10 @@ class RewardDialog(QDialog):
             meta = QLabel(f'НАГРАДА {number:02}' + (f'  ·  {cost:,} баллов'.replace(',', ' ') if type(cost) is int else ''))
             meta.setObjectName('micro')
             text.addWidget(meta)
+            priority = QCheckBox('Приоритет')
+            priority.setAccessibleName('Приоритет награды: ' + title)
+            priority.setChecked(ident in priority_ids)
+            text.addWidget(priority)
             row.addLayout(text, 1)
             duration_column = QVBoxLayout()
             duration_column.setSpacing(5)
@@ -164,6 +170,7 @@ class RewardDialog(QDialog):
             row.addLayout(duration_column)
             rows.addWidget(card)
             self.controls[ident] = (check, duration)
+            self.priority_checks[ident] = priority
             self.cards[ident] = card
             check.toggled.connect(lambda checked, key=ident: self.update_card(key))
         if not rewards:
@@ -195,6 +202,7 @@ class RewardDialog(QDialog):
     def update_card(self, ident):
         check, duration = self.controls[ident]
         duration.setEnabled(check.isChecked())
+        self.priority_checks[ident].setEnabled(check.isChecked())
         card = self.cards[ident]
         card.setProperty('selected', check.isChecked())
         card.style().unpolish(card)
@@ -208,3 +216,7 @@ class RewardDialog(QDialog):
 
     def selection(self):
         return {ident: duration.value() for ident, (check, duration) in self.controls.items() if check.isChecked()}
+
+    def priority_selection(self):
+        return [ident for ident, (check, _) in self.controls.items()
+                if check.isChecked() and self.priority_checks[ident].isChecked()]

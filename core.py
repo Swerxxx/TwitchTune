@@ -61,7 +61,6 @@ def parse_link(text):
             return url, source
     raise ValueError('Поддерживаются ссылки YouTube, SoundCloud, Яндекс Музыки, Spotify и VK.')
 
-
 def soundcloud_share_link(text):
     try:
         url, source = parse_link(text)
@@ -69,6 +68,17 @@ def soundcloud_share_link(text):
         return None
     if source == 'SoundCloud' and urlparse(url).hostname == 'on.soundcloud.com':
         return url
+
+
+def request_priority(row):
+    if row.get('donation_priority'):
+        return 0
+    if row.get('vip_priority'):
+        return 1
+    if row.get('reward_priority'):
+        return 2
+    return 3
+
 
 class QueueStore:
     def __init__(self, path):
@@ -94,6 +104,7 @@ class QueueStore:
                                  'reward_id': "TEXT DEFAULT ''", 'reward_title': "TEXT DEFAULT ''", 'cover_url': "TEXT DEFAULT ''",
                                  'cover_path': "TEXT DEFAULT ''", 'description_lyrics': "TEXT DEFAULT ''",
                                  'submitted_lyrics': 'TEXT', 'description_checked': 'INTEGER DEFAULT 0', 'soundcloud_description': "TEXT DEFAULT ''", 'vip_priority': 'INTEGER DEFAULT 0',
+                                 'reward_priority': 'INTEGER DEFAULT 0',
                                  'donation_priority': 'INTEGER DEFAULT 0', 'donation_provider': "TEXT DEFAULT ''",
                                  'donation_amount': "TEXT DEFAULT ''", 'donation_currency': "TEXT DEFAULT ''",
                                  'donation_time': 'REAL DEFAULT 0'}.items():
@@ -118,7 +129,9 @@ class QueueStore:
             self.db.execute('INSERT OR IGNORE INTO viewers(viewer_key,nickname) VALUES (?,?)', (key, r['viewer']))
         self.db.execute("UPDATE queue SET status='Ожидает загрузки' WHERE status IN ('Загрузка','Поиск записи','Поиск замены')")
         self.db.execute("UPDATE queue SET status='Готово' WHERE status='Играет'")
-        if self.db.execute("SELECT 1 FROM queue WHERE in_queue=1 AND donation_priority=1 AND status NOT IN ('Прослушано','Пропущено')").fetchone():
+        if self.db.execute("""SELECT 1 FROM queue WHERE in_queue=1
+                AND (donation_priority=1 OR reward_priority=1)
+                AND status NOT IN ('Прослушано','Пропущено')""").fetchone():
             self._order_priority()
         # Lift only the old ordinary/donation default. Explicit Twitch limits
         # and children of a Twitch album retain their original duration.
@@ -132,24 +145,27 @@ class QueueStore:
                      (COALESCE(parent.redemption,'')!='' AND parent.redemption NOT LIKE 'donation:%')))""",(MAX_TRACK_SECONDS,))
         self.db.commit()
 
-    def add(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None, reward_id=''):
+    def add(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None, reward_id='', *, reward_priority=False):
         if type(max_duration) is not int or not 1 <= max_duration <= MAX_TRACK_SECONDS:
             raise ValueError('Лимит длительности должен быть от 1 секунды до 90 минут.')
         tg_code = telegram_request(text)
         url, source = ('', 'Telegram') if tg_code is not None else parse_link(text)
-        return self._add(url, source, viewer, redemption, viewer_id, max_duration, reward_title, tg_code, donation=donation, reward_id=reward_id)
+        return self._add(url, source, viewer, redemption, viewer_id, max_duration, reward_title,
+                         tg_code, donation=donation, reward_id=reward_id, reward_priority=reward_priority)
 
     def add_local(self, metadata, viewer='Вручную'):
         if not re.fullmatch(r'[a-f0-9]{32}', metadata.get('id', '')):
             raise ValueError('Неверный идентификатор импортированного MP3.')
         return self._add('', 'MP3', viewer, local=metadata)
 
-    def add_telegram_mp3(self, order, viewer, redemption, max_duration, reward_title):
+    def add_telegram_mp3(self, order, viewer, redemption, max_duration, reward_title, *, reward_id='', reward_priority=False):
         return self._add('', 'Telegram', viewer, redemption, order['twitch'],
-                         max_duration, reward_title, order['code'], local=order)
+                         max_duration, reward_title, order['code'], local=order,
+                         reward_id=reward_id, reward_priority=reward_priority)
 
     def _add(self, url, source, viewer='Вручную', redemption=None, viewer_id=None,
-             max_duration=MAX_TRACK_SECONDS, reward_title='', tg_code=None, local=None, donation=None, reward_id=''):
+             max_duration=MAX_TRACK_SECONDS, reward_title='', tg_code=None, local=None,
+             donation=None, reward_id='', reward_priority=False):
         if type(max_duration) is not int or not 1 <= max_duration <= MAX_TRACK_SECONDS:
             raise ValueError('Лимит длительности должен быть от 1 секунды до 90 минут.')
         with self.lock:
@@ -196,7 +212,9 @@ class QueueStore:
                 self.db.execute('UPDATE queue SET title=?, artist=?, track=?, duration=?, path=?, cover_path=?, status=? WHERE id=?',
                     (local['title'], local.get('artist', ''), local.get('track', ''), local['duration'],
                      local['path'], local.get('cover_path', ''), 'Готово', ident))
-            self.db.execute('UPDATE queue SET reward_id=? WHERE id=?', (str(reward_id), ident))
+            reward_priority = bool(reward_priority and reward_id and redemption and not donation)
+            self.db.execute('UPDATE queue SET reward_id=?, reward_priority=? WHERE id=?',
+                            (str(reward_id or ''), reward_priority, ident))
             if local and source == 'Telegram':
                 self.db.execute('UPDATE queue SET submitted_lyrics=? WHERE id=?', (local['lyrics'], ident))
                 self.db.execute(
@@ -207,7 +225,7 @@ class QueueStore:
             if donation:
                 self.db.execute('UPDATE queue SET donation_priority=1, donation_provider=?, donation_amount=?, donation_currency=?, donation_time=? WHERE id=?',
                     (donation['provider'],donation['amount'],donation['currency'],donation['created_at'],ident))
-            if priority or donation:
+            if priority or donation or reward_priority:
                 self._order_priority()
             self.db.commit()
             return ident
@@ -218,9 +236,8 @@ class QueueStore:
         waiting=[r for r in active if r['status']=='Ждёт оценки']
         upcoming=[r for r in active if r['status'] not in ('Играет','Ждёт оценки')]
         paid=sorted((r for r in upcoming if r['donation_priority']),key=lambda r:(r['donation_time'],r['created_at'],r['position']))
-        vip=[r for r in upcoming if r['vip_priority'] and not r['donation_priority']]
-        regular=[r for r in upcoming if not r['vip_priority'] and not r['donation_priority']]
-        for position,row in zip(sorted(r['position'] for r in active),playing+paid+vip+regular+waiting):
+        unpaid=sorted((r for r in upcoming if not r['donation_priority']),key=request_priority)
+        for position,row in zip(sorted(r['position'] for r in active),playing+paid+unpaid+waiting):
             self.db.execute('UPDATE queue SET position=? WHERE id=?',(position,row['id']))
 
     def record_donation(self, event):
@@ -346,7 +363,7 @@ class QueueStore:
             if len(self.rows('active')) >= 100:
                 raise ValueError('Очередь заполнена: максимум 100 активных заявок.')
             position = self.db.execute('SELECT COALESCE(MAX(position),0)+1 FROM queue').fetchone()[0]
-            self.db.execute('UPDATE queue SET vip_priority=0, donation_priority=0 WHERE id=?',(ident,))
+            self.db.execute('UPDATE queue SET vip_priority=0, donation_priority=0, reward_priority=0 WHERE id=?',(ident,))
             self.update(ident, status='Готово', position=position, error='')
 
     def delete(self, ident):
@@ -461,7 +478,7 @@ class QueueStore:
         with self.lock:
             return [dict(r) for r in self.db.execute('SELECT * FROM queue WHERE album_id=? AND album_position>0 ORDER BY album_position', (ident,))]
 
-    def add_album(self, metadata, folder, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None, reward_id=''):
+    def add_album(self, metadata, folder, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', donation=None, reward_id='', *, reward_priority=False):
         tracks = metadata.get('tracks') or []
         if not 1 <= len(tracks) <= 100:
             raise ValueError('В альбоме должно быть от 1 до 100 треков.')
@@ -473,7 +490,8 @@ class QueueStore:
             if existing and not redemption:
                 return existing['id'], []
             ident = uuid.uuid4().hex
-            parent = self._add(metadata['url'], 'Альбом', viewer, redemption, viewer_id, max_duration, reward_title, donation=donation, reward_id=reward_id)
+            parent = self._add(metadata['url'], 'Альбом', viewer, redemption, viewer_id, max_duration,
+                               reward_title, donation=donation, reward_id=reward_id, reward_priority=reward_priority)
             parent_row = self.get(parent)
             key, viewer = parent_row['viewer_key'], parent_row['viewer']
             position = parent_row['position']

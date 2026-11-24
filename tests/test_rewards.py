@@ -80,6 +80,18 @@ class RewardTests(unittest.TestCase):
         dialog.deleteLater()
         QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
 
+    def test_priority_checkbox_is_only_saved_for_enabled_rewards(self):
+        rewards = [dict(id=key, title=key) for key in ('first', 'second')]
+        dialog = RewardDialog(rewards, {'first': 120}, priority_ids=['first'])
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual(dialog.priority_selection(), ['first'])
+        self.assertFalse(dialog.priority_checks['second'].isEnabled())
+        dialog.controls['second'][0].setChecked(True)
+        dialog.priority_checks['second'].setChecked(True)
+        dialog.controls['first'][0].setChecked(False)
+        self.assertEqual(dialog.priority_selection(), ['second'])
+        self.assertEqual(dialog.selection(), {'second': 5400})
+
     def test_second_precision_filter_and_label(self):
         self.assertEqual(limit_text(157),'2 мин 37 сек')
         self.assertIsNone(metadata_filter({'duration':157},max_seconds=157))
@@ -120,3 +132,32 @@ class RewardTests(unittest.TestCase):
                 store.requeue(ident)
                 self.assertEqual(store.get(ident)['max_duration'],120)
             finally:store.db.close()
+
+    def test_legacy_queue_migrates_and_reward_priority_survives_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'queue.db'
+            store = QueueStore(path)
+            ordinary = store.add('https://youtu.be/ordinary', redemption='old', reward_id='music')
+            store.db.execute('ALTER TABLE queue DROP COLUMN reward_priority')
+            store.db.commit()
+            store.db.close()
+            with self.subTest(stage='migration'):
+                store = QueueStore(path)
+                try:
+                    self.assertEqual(store.get(ordinary)['reward_priority'], 0)
+                    marked = store.add('https://youtu.be/new', redemption='new', reward_id='music',
+                                       reward_priority=True)
+                finally:
+                    store.db.close()
+            with self.subTest(stage='restart'):
+                store = QueueStore(path)
+                try:
+                    self.assertEqual([r['id'] for r in store.rows('active')], [marked, ordinary])
+                    self.assertEqual(store.get(marked)['reward_priority'], 1)
+                    store.rate(marked, 8)
+                    store.finish(marked)
+                    store.requeue(marked)
+                    self.assertEqual(store.get(marked)['reward_priority'], 0)
+                    self.assertEqual([r['id'] for r in store.rows('active')], [ordinary, marked])
+                finally:
+                    store.db.close()

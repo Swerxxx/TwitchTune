@@ -19,6 +19,7 @@ from album_window import AlbumsPanel
 from album_covers import load_album_cover
 from donation_settings import DonationSettings
 from binary_update_settings import BinaryUpdateSettings
+from minigames import ANIME_TITLE, IQ_TITLE, QuizDialog
 from core import QueueStore, load_config, save_config, telegram_request, telegram_delivery_note, parse_link, soundcloud_share_link
 from media import Downloader, search, load_saved_cover
 from twitch import TwitchClient, MANAGE_SCOPE
@@ -604,6 +605,11 @@ class Main(QMainWindow):
         description.setWordWrap(True)
         appearance_layout.addRow(description)
         content.addWidget(appearance)
+        games_box = QGroupBox('Мини-игры')
+        games_layout = QHBoxLayout(games_box)
+        self.iq_test_button = self.button(IQ_TITLE, lambda: self.open_quiz(iq_test=True), games_layout)
+        self.anime_quiz_button = self.button(ANIME_TITLE, self.open_quiz, games_layout)
+        content.addWidget(games_box)
         bot_box = QGroupBox('TELEGRAM · ПРИЁМ MP3')
         bot_layout = QVBoxLayout(bot_box)
         bot_hint = QLabel('Зритель входит через Twitch в личном чате бота, отправляет MP3 и текст. '
@@ -680,6 +686,14 @@ class Main(QMainWindow):
         self.settings_wheel_guard.protect_children(body)
         layout.addWidget(scroll)
         self.tabs.addTab(page, 'Настройки')
+
+    def open_quiz(self, *, iq_test=False):
+        dialog = QuizDialog(self, iq_test=iq_test)
+        dialog.exec()
+        exit_after_quiz = dialog.exit_after_quiz
+        dialog.deleteLater()
+        if exit_after_quiz:
+            self.exit_application()
 
     def build_yandex_settings(self, layout):
         box = QGroupBox('ЯНДЕКС МУЗЫКА / ПРЯМАЯ ЗАГРУЗКА')
@@ -1370,10 +1384,13 @@ class Main(QMainWindow):
     def configure_rewards(self):
         if not self.available_rewards or not self.client:
             return
-        dialog = RewardDialog(self.available_rewards, self.active_reward_limits, self)
+        dialog = RewardDialog(self.available_rewards, self.active_reward_limits, self,
+                              priority_ids=self.cfg.get('priority_reward_ids') or ())
         if dialog.exec() == QDialog.Accepted:
             self.cfg['reward_limits'] = dialog.selection()
+            self.cfg['priority_reward_ids'] = dialog.priority_selection()
             self.show_rewards(self.available_rewards)
+            save_config(APP, self.cfg)
         dialog.deleteLater()
 
     def update_telegram_reward_options(self):
@@ -1438,6 +1455,7 @@ class Main(QMainWindow):
             return
         if not self.active_reward_limits and self.reward and reward_id != self.reward['id']:
             return
+        reward_priority = reward_id in (self.cfg.get('priority_reward_ids') or ())
         if self.client:
             self.twitch_completions.bind(event, self.client.client_id,
                                         (self.client.user or {}).get('user_id',''))
@@ -1445,7 +1463,7 @@ class Main(QMainWindow):
             try:
                 code = telegram_request(event.get('user_input', ''))
                 if code:
-                    if self.telegram_orders.accept_reward(event, code):
+                    if self.telegram_orders.accept_reward(event, code, reward_priority=reward_priority):
                         self.log.appendPlainText('MP3 из Telegram добавлен по награде Twitch.')
                         self.refresh()
                     return
@@ -1457,18 +1475,15 @@ class Main(QMainWindow):
         if TELEGRAM_PAUSED and telegram_delivery_note(event.get('user_input', '')):
             self.log.appendPlainText(f"Заявка от {event.get('user_name', 'зритель')}: пропущена — трек в Telegram.")
             return
-        text = event.get('user_input','')
+        text = event.get('user_input', '')
+        order = dict(viewer=event.get('user_name', 'зритель'), redemption=event.get('id'),
+                     viewer_id=event.get('user_id'), max_duration=self.active_reward_limits.get(reward_id, MAX_TRACK_SECONDS),
+                     reward_title=event_reward.get('title', ''), reward_id=reward_id, reward_priority=reward_priority)
         if album_reference(text) or soundcloud_share_link(text):
-            self.import_album(text,dict(viewer=event.get('user_name','зритель'),
-                redemption=event.get('id'),viewer_id=event.get('user_id'),
-                max_duration=self.active_reward_limits.get(reward_id,MAX_TRACK_SECONDS),reward_title=event_reward.get('title',''),reward_id=reward_id),
-                allow_track=True)
+            self.import_album(text, order, allow_track=True)
             return
         try:
-            ident = self.add_request(event.get('user_input', ''), event.get('user_name', 'зритель'),
-                                   event.get('id'), viewer_id=event.get('user_id'),
-                                   max_duration=self.active_reward_limits.get(reward_id, MAX_TRACK_SECONDS),
-                                   reward_title=event_reward.get('title', ''), reward_id=reward_id)
+            ident = self.add_request(text, **order)
             if ident:
                 self.submit_request(ident)
                 self.log.appendPlainText(f"Заявка от {event.get('user_name')}: добавлена")
@@ -1774,10 +1789,11 @@ class Main(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, 'История', str(exc))
 
-    def add_request(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', reward_id=''):
+    def add_request(self, text, viewer='Вручную', redemption=None, viewer_id=None, max_duration=MAX_TRACK_SECONDS, reward_title='', reward_id='', *, reward_priority=False):
         if TELEGRAM_PAUSED and telegram_request(text) is not None:
             raise ValueError('Приём из Telegram пока отложен. Укажи ссылку на трек.')
-        return self.store.add(text, viewer, redemption, viewer_id, max_duration=max_duration, reward_title=reward_title, reward_id=reward_id)
+        return self.store.add(text, viewer, redemption, viewer_id, max_duration=max_duration,
+                              reward_title=reward_title, reward_id=reward_id, reward_priority=reward_priority)
 
     def submit_request(self, ident):
         if self.store.get(ident)['source'] == 'MP3':

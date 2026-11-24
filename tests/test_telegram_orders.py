@@ -100,6 +100,16 @@ class TelegramOrderTests(unittest.TestCase):
         ident = self.bot.accept_reward(self.reward(), order['code'])
         self.assertEqual(self.store.get(ident)['submitted_lyrics'], '')
 
+    def test_marked_reward_prioritizes_telegram_mp3_in_queue(self):
+        self.authorize()
+        order = self.upload()
+        self.callback('no_lyrics:' + order['code'])
+        ordinary = self.store.add('https://youtu.be/ordinary')
+        ident = self.bot.accept_reward(self.reward(), order['code'], reward_priority=True)
+        row = self.store.get(ident)
+        self.assertEqual((row['reward_id'], row['reward_priority'], row['status']), ('short', 1, 'Готово'))
+        self.assertEqual([r['id'] for r in self.store.rows('active')], [ident, ordinary])
+
     def test_unregistered_upload_starts_login_and_group_message_is_ignored(self):
         self.bot.begin_login = Mock()
         self.message(audio={'file_id': 'file', 'file_name': 'a.mp3'})

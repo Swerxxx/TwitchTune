@@ -11,7 +11,7 @@ from threading import Event
 from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QThread, QUrl, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtMultimedia import QMediaPlayer
 import app as module
 
@@ -90,6 +90,34 @@ class AppTests(unittest.TestCase):
         self.window.store.update(ident, status='Готово', path=str(path), title='Test Song')
         self.window.refresh()
         return ident
+
+    def test_minigames_settings_buttons_and_iq_full_exit(self):
+        self.window.nav_buttons[3].click()
+        self.window.show()
+        self.assertTrue(self.window.iq_test_button.isVisible())
+        self.assertTrue(self.window.anime_quiz_button.isVisible())
+        played = []
+
+        def finish_dialog(dialog):
+            played.append(dialog.windowTitle())
+            if dialog.iq_test:
+                for question in dialog.questions:
+                    next(button for button in dialog.options if button.text() == question.distractors[0]).click()
+            dialog.reject()
+            return dialog.result()
+
+        tray = Mock()
+        self.window.background_tray = tray
+        self.window.cfg['telegram_keep_running'] = True
+        with patch.object(module.QuizDialog, 'exec', finish_dialog), patch.object(module.QApplication, 'quit'):
+            self.window.anime_quiz_button.click()
+            self.assertTrue(self.window.isVisible())
+            self.window.iq_test_button.click()
+        self.assertEqual(played, ['Угадай аниме персонажа', 'Тест на IQ'])
+        self.assertTrue(self.window.exit_requested)
+        self.assertFalse(self.window.isVisible())
+        self.assertTrue(self.window.down.stop.is_set())
+        tray.hide.assert_called_once()
 
     def test_local_mp3_batch_import_keeps_playback_and_skips_network_downloader(self):
         current = self.ready()
@@ -462,6 +490,9 @@ class AppTests(unittest.TestCase):
 
     def test_soundcloud_short_links_preserve_twitch_album_and_single_track_orders(self):
         from test_albums import album_metadata
+        ordinary = self.ready('ordinary')
+        self.window.cfg['priority_reward_ids'] = ['music']
+        self.window.active_reward_limits = {'music': 5400}
         short_album = 'https://on.soundcloud.com/albumCode'
         short_track = 'https://on.soundcloud.com/trackCode'
         album_url = 'https://soundcloud.com/artist/sets/album'
@@ -472,8 +503,9 @@ class AppTests(unittest.TestCase):
         targets = {short_album: album_url, short_track: track_url}
         with patch.object(module, 'resolve_shared_soundcloud', side_effect=lambda url, **_: targets[url]), \
                 patch.object(module, 'catalog', return_value=album) as loader:
-            self.window.redeem(dict(id='album', user_input=short_album, user_id='123', user_name='Viewer'))
-            self.window.redeem(dict(id='track', user_input=short_track, user_id='123', user_name='Viewer'))
+            for ident, url in (('album', short_album), ('track', short_track)):
+                self.window.redeem(dict(id=ident, user_input=url, user_id='123', user_name='Viewer',
+                                        reward={'id': 'music'}))
             deadline = time.monotonic() + 4
             while self.window.jobs and time.monotonic() < deadline:
                 self.application.processEvents()
@@ -483,6 +515,8 @@ class AppTests(unittest.TestCase):
         track = self.window.store.get_redemption('track')
         self.assertEqual(parent['source'], 'Альбом')
         self.assertEqual(track['url'], track_url)
+        self.assertEqual((parent['reward_priority'], track['reward_priority']), (1, 1))
+        self.assertEqual(self.window.store.rows('active')[-1]['id'], ordinary)
         children = self.window.store.album_tracks(parent['album_id'])
         self.assertEqual([row['url'] for row in children], [api_track])
         self.assertCountEqual(self.window.down.submitted, [children[0]['id'], track['id']])
@@ -629,6 +663,68 @@ class AppTests(unittest.TestCase):
         # Opening/saving the available rewards again restores all three.
         self.window.show_rewards(rewards)
         self.assertEqual(self.window.client.connected, ['2','3','4'])
+
+    def test_priority_checkbox_persists_by_reward_id_and_affects_only_new_redemptions(self):
+        self.window.client = self.window.make_client('id')
+        self.window.cfg['reward_limits'] = {'normal': 120, 'priority': 157}
+        rewards = [dict(id=key, title=key, is_enabled=True, is_user_input_required=True)
+                   for key in ('normal', 'priority')]
+        self.window.sync_reward_catalog(rewards)
+        client = self.window.client
+
+        def redeem(ident, reward):
+            event = dict(id=ident, user_id='42', user_name='Viewer', user_input='https://youtu.be/test',
+                         reward=dict(id=reward, title='Заказ трека'))
+            self.window.redeem(event)
+            return self.window.store.get_redemption(ident)
+
+        def set_priority(dialog, enabled):
+            dialog.priority_checks['priority'].setChecked(enabled)
+            return QDialog.Accepted
+
+        ordinary = redeem('ordinary', 'normal')
+        earlier = redeem('earlier', 'priority')
+        with patch.object(module.RewardDialog, 'exec', lambda dialog: set_priority(dialog, True)):
+            self.window.configure_rewards()
+        self.assertIs(self.window.client, client)
+        self.window.cfg = module.load_config(module.APP)
+        self.assertEqual(self.window.cfg['priority_reward_ids'], ['priority'])
+        self.assertEqual(self.window.cfg['reward_limits'], {'normal': 120, 'priority': 157})
+
+        self.window.sync_reward_catalog([rewards[0], dict(rewards[1], title='Переименованный заказ')])
+        marked = redeem('marked', 'priority')
+        redeem('marked', 'priority')
+        self.assertEqual(marked['reward_priority'], 1)
+        self.assertEqual(marked['max_duration'], 157)
+        self.assertEqual([r['id'] for r in self.window.store.rows('active')],
+                         [marked['id'], ordinary['id'], earlier['id']])
+
+        def remove_priority(dialog):
+            self.assertTrue(dialog.priority_checks['priority'].isChecked())
+            return set_priority(dialog, False)
+
+        with patch.object(module.RewardDialog, 'exec', remove_priority):
+            self.window.configure_rewards()
+        self.assertEqual(module.load_config(module.APP)['priority_reward_ids'], [])
+        self.assertEqual(redeem('after', 'priority')['reward_priority'], 0)
+        self.assertEqual(self.window.store.rows('active')[0]['id'], marked['id'])
+
+    def test_priority_twitch_album_enters_queue_as_one_request(self):
+        from test_albums import album_metadata
+        ordinary = self.ready('ordinary')
+        self.window.cfg['priority_reward_ids'] = ['album-reward']
+        self.window.active_reward_limits = {'album-reward': 5400}
+        event = dict(id='priority-album', user_name='viewer', user_id='123',
+                     user_input='https://music.yandex.ru/album/123', reward=dict(id='album-reward', title='Альбом'))
+        with patch.object(module, 'catalog', return_value=album_metadata()):
+            self.window.redeem(event)
+            deadline = time.monotonic() + 4
+            while self.window.jobs and time.monotonic() < deadline:
+                self.application.processEvents()
+        parent = self.window.store.get_redemption('priority-album')
+        self.assertEqual(parent['reward_priority'], 1)
+        self.assertEqual([r['id'] for r in self.window.store.rows('active')], [parent['id'], ordinary])
+        self.assertEqual(len(self.window.store.album_tracks(parent['album_id'])), 2)
 
     def test_seconds_in_reward_limit_survive_settings_and_reach_request(self):
         self.window.client=self.window.make_client('id')

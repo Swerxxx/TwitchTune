@@ -3,6 +3,7 @@ import re
 import threading
 from pathlib import Path
 from urllib.parse import quote_plus
+from core import request_priority
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError, ExtractorError
 from yandex_direct import extract_direct, validate_full_track, YandexAccessError
@@ -165,11 +166,13 @@ class Downloader:
         with self.lock:
             if ident not in self.pending:
                 row=self.store.get(ident) or {}
-                request=self.store.album_request(row['album_id']) if row.get('album_id') and row.get('album_position') else row
-                paid=bool(request and request.get('donation_priority'))
+                request = self.store.album_request(row['album_id']) if row.get('album_id') and row.get('album_position') else row
+                request = request or {}
+                priority = request_priority(request)
+                donation_time = request.get('donation_time', 0) if request.get('donation_priority') else 0
                 self.pending.add(ident)
                 self.job_sequence+=1
-                self.jobs.put((0 if paid else 1,request.get('donation_time',0) if paid else 0,self.job_sequence,ident))
+                self.jobs.put((priority, donation_time, self.job_sequence, ident))
 
     def worker(self):
         while not self.stop.is_set():

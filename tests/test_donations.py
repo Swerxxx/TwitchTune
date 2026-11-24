@@ -46,6 +46,22 @@ class DonationCoreTests(unittest.TestCase):
         self.assertEqual([r['id'] for r in self.store.rows('active')],[playing,earlier,later,vip,second_vip,ordinary])
         self.assertEqual(self.store.get(playing)['status'],'Играет')
 
+    def test_paid_then_vip_then_marked_rewards_then_regular_with_fifo(self):
+        playing = self.store.add('https://youtu.be/playing')
+        self.store.update(playing, status='Играет')
+        ordinary = self.store.add('https://youtu.be/ordinary', redemption='normal', reward_id='normal')
+        first = self.store.add('https://youtu.be/first', redemption='first', reward_id='marked', reward_priority=True)
+        later = self.add_paid('later', timestamp='2026-11-06T10:02:00Z')
+        second = self.store.add('https://youtu.be/second', redemption='second', reward_id='marked', reward_priority=True)
+        self.store.grant_vip('VIP')
+        vip = self.store.add('https://youtu.be/vip', 'VIP')
+        vip_marked = self.store.add('https://youtu.be/vip2', 'VIP', redemption='vip2', reward_id='marked', reward_priority=True)
+        earlier = self.add_paid('earlier', provider='donationalerts', timestamp='2026-11-06T10:01:00Z')
+        last = self.store.add('https://youtu.be/last')
+        self.assertEqual([r['id'] for r in self.store.rows('active')],
+                         [playing, earlier, later, vip, vip_marked, first, second, ordinary, last])
+        self.assertEqual(self.store.get(playing)['status'], 'Играет')
+
     def test_persistent_inbox_dedup_and_delete_prevent_resurrection(self):
         paid=event()
         self.assertTrue(self.store.record_donation(paid));self.assertFalse(self.store.record_donation(paid))
@@ -87,6 +103,24 @@ class DonationCoreTests(unittest.TestCase):
             downloader.submit(paid) # Same id cannot create a duplicate job.
             jobs=[downloader.jobs.get_nowait()[3] for _ in range(4)]
             self.assertEqual(jobs,[paid,*children,normal])
+
+    def test_download_jobs_follow_priority_including_reward_album_children(self):
+        from media import Downloader
+        from albums import create_album
+        from test_albums import album_metadata
+        ordinary = self.store.add('https://youtu.be/ordinary')
+        self.store.grant_vip('VIP')
+        vip = self.store.add('https://youtu.be/vip', 'VIP')
+        paid = self.add_paid('paid')
+        with tempfile.TemporaryDirectory() as folder:
+            _, children = create_album(self.store, Path(folder), album_metadata(),
+                                       redemption='album', reward_id='marked', reward_priority=True)
+            with patch('media.threading.Thread.start'):
+                downloader = Downloader(self.store, Path(folder) / 'tracks', lambda *_: None)
+            for ident in (ordinary, *children, vip, paid):
+                downloader.submit(ident)
+            self.assertEqual([downloader.jobs.get_nowait()[3] for _ in range(5)],
+                             [paid, vip, *children, ordinary])
 
     def test_priority_and_pending_inbox_survive_restart(self):
         with tempfile.TemporaryDirectory() as folder:
