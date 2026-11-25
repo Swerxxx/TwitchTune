@@ -4,6 +4,14 @@ from PySide6.QtGui import QTextCursor, QTextBlockFormat
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                               QPushButton, QComboBox, QTextEdit, QFrame, QWidget)
 from lyrics import song_query, plain_text, exact_match
+from soundcloud_text import soundcloud_profile_handle
+
+
+def load_soundcloud_artist(owner, row, cancelled, done):
+    from media import recover_soundcloud_artist
+
+    owner.run_async(lambda: recover_soundcloud_artist(owner.store, row, cancelled),
+                    done, lambda _: None)
 
 
 class LyricsDialog(QDialog):
@@ -23,21 +31,26 @@ class LyricsDialog(QDialog):
         title.setObjectName('section')
         layout.addWidget(title)
         artist, track = song_query(row)
+        self.source_artist = artist
+        self.soundcloud = row.get('source') == 'SoundCloud'
+        self.profile_hint = soundcloud_profile_handle(row.get('url')) if self.soundcloud else ''
         self.track_label = QLabel(track or row['title'])
         self.track_label.setTextFormat(Qt.PlainText)
         self.track_label.setObjectName('lyricsTitle')
         self.track_label.setWordWrap(True)
         layout.addWidget(self.track_label)
-        self.artist_label = QLabel(artist or 'Неизвестный исполнитель')
+        self.artist_label = QLabel()
         self.artist_label.setTextFormat(Qt.PlainText)
         self.artist_label.setObjectName('muted')
+        self.artist_label.setWordWrap(True)
+        self.show_artist()
         layout.addWidget(self.artist_label)
         toolbar = QHBoxLayout()
         self.refine = QPushButton('Уточнить поиск')
         self.refine.setCheckable(True)
         toolbar.addWidget(self.refine)
         self.description_button=QPushButton('Описание SoundCloud')
-        self.description_button.setVisible(row.get('source')=='SoundCloud')
+        self.description_button.setVisible(self.soundcloud)
         self.description_button.clicked.connect(lambda: self.owner.show_soundcloud_description(self.row))
         toolbar.addWidget(self.description_button)
         toolbar.addStretch()
@@ -99,6 +112,24 @@ class LyricsDialog(QDialog):
             self.search()
         else:
             self.show_results(results)
+        if self.soundcloud and not artist:
+            load_soundcloud_artist(self.owner, row, lambda: self.closed or self.owner.closing,
+                                   self.artist_recovered)
+
+    def show_artist(self, result_artist=''):
+        selected = str(result_artist or '').strip()
+        if self.soundcloud and self.source_artist:
+            selected = self.source_artist
+        self.artist_label.setText(selected or self.source_artist or self.profile_hint or 'Неизвестный исполнитель')
+
+    def artist_recovered(self, artist):
+        if self.closed or self.owner.closing or not artist:
+            return
+        self.source_artist = artist
+        self.row = dict(self.row, artist=artist)
+        if not self.artist.isModified() and not self.artist.text().strip():
+            self.artist.setText(artist)
+        self.show_artist()
 
     def resize_text(self, delta):
         self.font_size = max(11, min(24, self.font_size + delta))
@@ -149,7 +180,10 @@ class LyricsDialog(QDialog):
         self.versions.clear()
         for row in results:
             secs = int(row.get('duration') or 0)
-            label = f"{row.get('artistName', '')} — {row['trackName']}"
+            artist = str(row.get('artistName') or '').strip()
+            if self.soundcloud:
+                artist = artist or self.source_artist or self.profile_hint
+            label = f"{artist} — {row['trackName']}" if artist else row['trackName']
             if row.get('albumName'):
                 label += ' · ' + row['albumName']
             label += ' · ' + row.get('source', 'LRCLIB')
@@ -182,7 +216,7 @@ class LyricsDialog(QDialog):
         text = plain_text(record)
         if text:
             self.track_label.setText(record['trackName'])
-            self.artist_label.setText(record.get('artistName', ''))
+            self.show_artist(record.get('artistName'))
             self.info.setText('Показано полное описание: оно может содержать ссылки, контакты и сведения о релизе.' if record.get('descriptionFallback') else ('Показан ранее сохранённый текст. Для новой проверки нажми «Найти».' if record.get('cachedCopy') else ''))
             # Never interpret provider data as HTML or executable rich text.
             self.set_lyrics(text)
@@ -206,6 +240,11 @@ class SoundCloudDescriptionDialog(QDialog):
         title.setWordWrap(True)
         title.setObjectName('lyricsTitle')
         layout.addWidget(title)
+        self.artist_label = QLabel()
+        self.artist_label.setTextFormat(Qt.PlainText)
+        self.artist_label.setObjectName('muted')
+        self.artist_label.setWordWrap(True)
+        layout.addWidget(self.artist_label)
         self.info = QLabel('Описание SoundCloud')
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
@@ -219,10 +258,22 @@ class SoundCloudDescriptionDialog(QDialog):
         layout.addWidget(self.refresh_button)
         self.finished.connect(self.finish_reader)
         current = parent.store.get(row['id']) or row
+        artist, _ = song_query(current)
+        self.show_artist(artist)
         if current.get('soundcloud_description'):
             self.body.setPlainText(current['soundcloud_description'])
+            if not artist:
+                load_soundcloud_artist(self.owner, current, self.cancelled, self.show_artist)
         else:
             self.load_description()
+
+    def cancelled(self):
+        return self.closed or self.owner.closing
+
+    def show_artist(self, artist):
+        if not self.cancelled():
+            self.artist_label.setText(artist or soundcloud_profile_handle(self.row.get('url'))
+                                      or 'Неизвестный исполнитель')
 
     def finish_reader(self):
         self.closed = True
@@ -235,12 +286,11 @@ class SoundCloudDescriptionDialog(QDialog):
         self.refresh_button.setEnabled(False)
         self.info.setText('Получаем описание SoundCloud…')
 
-        def cancelled():
-            return self.closed or self.owner.closing
-
         def done(record):
-            if cancelled():
+            if self.cancelled():
                 return
+            current = self.owner.store.get(row['id']) or row
+            self.show_artist(song_query(current)[0])
             self.refresh_button.setEnabled(True)
             if record:
                 self.body.setPlainText(record['plainLyrics'])
@@ -249,6 +299,6 @@ class SoundCloudDescriptionDialog(QDialog):
                 self.info.setText('Описание пустое или SoundCloud не ответил. Попробуй ещё раз.')
 
         self.owner.run_async(
-            lambda: soundcloud_lyrics(self.owner.store, row, cancelled=cancelled, force=True, full=True),
+            lambda: soundcloud_lyrics(self.owner.store, row, cancelled=self.cancelled, force=True, full=True),
             done, lambda _: done(None),
         )

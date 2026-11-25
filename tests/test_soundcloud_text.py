@@ -89,7 +89,8 @@ class SoundCloudTextTests(unittest.TestCase):
                 ydl=Mock()
                 ydl.__enter__=Mock(return_value=ydl)
                 ydl.__exit__=Mock(return_value=False)
-                ydl.extract_info.return_value=dict(title='Track',artist='Artist',track='Track',duration=120,description=DESCRIPTION)
+                ydl.extract_info.return_value=dict(title='Track',uploader='Artist Display Name',track='Track',
+                                                   duration=120,description=DESCRIPTION)
                 ydl.prepare_filename.return_value=str(audio)
                 downloader=Downloader.__new__(Downloader)
                 downloader.store,downloader.folder,downloader.stop,downloader.emit=store,Path(folder),Event(),Mock()
@@ -97,6 +98,11 @@ class SoundCloudTextTests(unittest.TestCase):
                     downloader.download(store.get(ident))
                 row=store.get(ident)
                 self.assertEqual(row['status'],'Готово')
+                self.assertEqual(row['artist'], 'Artist Display Name')
+                with patch('media.YoutubeDL', return_value=ydl):
+                    ydl.extract_info.return_value.update(artists=['First Artist', 'Second Artist'], uploader='Label')
+                    downloader.download(row)
+                self.assertEqual(store.get(ident)['artist'], 'First Artist, Second Artist')
                 self.assertEqual(row['description_lyrics'],'[Куплет]\n'+TEXT)
                 self.assertEqual(row['description_checked'],2)
                 self.assertIn('Listen on',row['soundcloud_description'])

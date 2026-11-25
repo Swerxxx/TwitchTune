@@ -1138,6 +1138,45 @@ class AppTests(unittest.TestCase):
         external.assert_called_once()
         self.assertEqual(external.call_args.args[:2],('Artist','Song'))
 
+    def test_soundcloud_artist_is_kept_when_lyrics_result_has_no_artist(self):
+        ident = self.window.store.add('https://soundcloud.com/artist/track')
+        self.window.store.update(ident, title='Song', track='Song', artist='Artist Nick')
+        self.window.current = ident
+        self.window.lyrics_candidates = [dict(trackName='Song', artistName=None,
+                                              plainLyrics='Строка текста', source='LRCLIB')]
+        self.window.show_lyrics()
+        dialog = self.window.lyrics_window
+        dialog.versions.setCurrentIndex(0)
+        self.assertEqual(dialog.body.toPlainText(), 'Строка текста')
+        self.assertEqual(dialog.artist_label.text(), 'Artist Nick')
+        dialog.reject()
+
+    def test_legacy_soundcloud_artist_is_recovered_without_audio_download(self):
+        url = 'https://api-v2.soundcloud.com/tracks/111'
+        ident = self.window.store.add(url)
+        self.window.store.update(ident, title='Song', track='Song', description_checked=2)
+        self.window.current = ident
+        self.window.lyrics_candidates = []
+        with patch.object(self.window, 'run_async', side_effect=lambda fn, done, failed=None: done(fn())), \
+                patch('media.extract_soundcloud', return_value={'uploader': 'Artist Nick'}) as extract:
+            self.window.show_lyrics()
+        self.assertEqual(extract.call_args.args[1], url)
+        self.assertFalse(extract.call_args.kwargs['download'])
+        self.assertEqual(self.window.store.get(ident)['artist'], 'Artist Nick')
+        self.assertEqual(self.window.lyrics_window.artist_label.text(), 'Artist Nick')
+        self.window.lyrics_window.reject()
+
+    def test_soundcloud_profile_handle_is_visible_when_metadata_is_unavailable(self):
+        ident = self.window.store.add('https://soundcloud.com/artist-nick/song')
+        self.window.store.update(ident, title='Song', track='Song')
+        self.window.current = ident
+        self.window.lyrics_candidates = []
+        with patch.object(self.window, 'run_async', side_effect=lambda fn, done, failed=None: done(fn())), \
+                patch('media.extract_soundcloud', side_effect=RuntimeError('Service unavailable')):
+            self.window.show_lyrics()
+        self.assertEqual(self.window.lyrics_window.artist_label.text(), '@artist-nick')
+        self.window.lyrics_window.reject()
+
     def test_soundcloud_description_opens_separately_and_refreshes_without_audio_download(self):
         ident = self.window.store.add('https://soundcloud.com/artist/track', 'Viewer')
         raw = 'Короткий текст\nhttps://example.org\n@artist'
@@ -1151,14 +1190,18 @@ class AppTests(unittest.TestCase):
             self.window.description_button.click()
             description = self.window.description_window
             self.assertEqual(description.body.toPlainText(), raw)
+            self.assertEqual(description.artist_label.text(), 'Artist')
             self.window.show_lyrics()
             lyrics = self.window.lyrics_window
             lyrics.description_button.click()
             self.assertIs(self.window.description_window, description)
-            with patch('media.extract_soundcloud', return_value={'description': 'Обновлённое описание'}) as extract:
+            with patch('media.extract_soundcloud', return_value={
+                'description': 'Обновлённое описание', 'uploader': 'Artist Nick',
+            }) as extract:
                 description.refresh_button.click()
                 self.assertFalse(extract.call_args.kwargs['download'])
                 self.assertEqual(description.body.toPlainText(), 'Обновлённое описание')
+                self.assertEqual(description.artist_label.text(), 'Artist Nick')
             self.assertEqual(lyrics.body.toPlainText(), 'Текст песни')
             description.reject()
             lyrics.reject()

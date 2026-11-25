@@ -11,7 +11,7 @@ from track_files import remove_track_files, downloaded_audio_path, track_folder
 from spotify_support import spotify_metadata, choose_spotify_version, SpotifyError
 from covers import download_cover, image_url
 from source_metadata import yandex_metadata
-from soundcloud_text import description_lyrics, description_text, lyrics_record
+from soundcloud_text import description_lyrics, description_text, lyrics_record, soundcloud_artist
 from soundcloud_download import extract_soundcloud
 from vk_audio import extract_vk_audio, vk_audio_id
 
@@ -124,6 +124,37 @@ def load_saved_cover(store, folder, row, cancelled=lambda: False):
         return ''
 
 
+def soundcloud_info(url, cancelled):
+    opts = options(soundcloud=True)
+    opts.update(skip_download=True)
+    with YoutubeDL(opts) as ydl:
+        return extract_soundcloud(ydl, url, download=False, cancelled=cancelled) or {}
+
+
+def remember_soundcloud_artist(store, ident, info, cancelled):
+    artist = soundcloud_artist(info)
+    if not artist:
+        return ''
+    with store.lock:
+        row = store.get(ident)
+        if not row or cancelled():
+            return ''
+        existing = (row.get('artist') or '').strip()
+        if existing:
+            return existing
+        return artist if store.update_download(ident, artist=artist) else ''
+
+
+def recover_soundcloud_artist(store, row, cancelled):
+    try:
+        if cancelled():
+            return ''
+        info = soundcloud_info(row['url'], cancelled)
+        return remember_soundcloud_artist(store, row['id'], info, cancelled)
+    except Exception:
+        return ''
+
+
 def soundcloud_lyrics(store, row, cancelled=lambda: False,*,force=False,full=False):
     """Use saved description first; inspect old tracks without redownloading audio."""
     if row['source'] != 'SoundCloud' or cancelled():
@@ -132,20 +163,17 @@ def soundcloud_lyrics(store, row, cancelled=lambda: False,*,force=False,full=Fal
     if not force and (saved or (row.get('description_checked') or 0)>=2):
         return saved
     try:
-        opts = options(soundcloud=True)
-        opts.update(skip_download=True)
-        with YoutubeDL(opts) as ydl:
-            info = extract_soundcloud(ydl,row['url'],download=False,cancelled=cancelled) or {}
-        if cancelled():
-            return None
+        info = soundcloud_info(row['url'], cancelled)
         if cancelled():return None
+        artist = remember_soundcloud_artist(store, row['id'], info, cancelled)
         description=info.get('description')
         if not isinstance(description,str):return saved
         text = description_lyrics(description)
         raw=description_text(description)
         if not store.update_download(row['id'], description_lyrics=text, soundcloud_description=raw,description_checked=2):
             return None
-        return lyrics_record(dict(row, description_lyrics=text,soundcloud_description=raw),full=full)
+        return lyrics_record(dict(row, artist=artist or row.get('artist', ''),
+                                  description_lyrics=text, soundcloud_description=raw), full=full)
     except Exception:
         return saved if not cancelled() else None
 
@@ -379,6 +407,8 @@ class Downloader:
         artists = info.get('artists') or []
         spotify = row['source'] == 'Spotify' or album_replacement
         artist = (row.get('artist') if spotify else '') or info.get('artist') or (', '.join(map(str, artists)) if isinstance(artists, (list, tuple)) else str(artists))
+        if direct_soundcloud:
+            artist = soundcloud_artist(info) or row.get('artist', '')
         track = (row.get('track') if spotify else '') or info.get('track') or (info.get('title') if direct_yandex else '') or ''
         title = (str(artist)+' — '+track) if (direct_yandex or spotify) and artist and track else info.get('title') or row['title']
         cover_info = {'cover_url': row.get('cover_url')} if spotify and row.get('cover_url') else info

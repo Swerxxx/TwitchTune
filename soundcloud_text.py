@@ -1,10 +1,43 @@
 """Find a lyrics block in a SoundCloud description, excluding release credits."""
 import re
 from html import unescape
+from urllib.parse import unquote, urlparse
 
 HEADING = re.compile(r'^\s*[#*📝🎤\s]*(?:lyrics|текст(?:\s+(?:песни|трека))?|слова\s+песни)\s*(?::|：|[-—])?\s*$', re.I)
 SECTION = re.compile(r'^\[?(?:verse|chorus|bridge|intro|outro|hook|куплет|припев|бридж)(?:\s+\d+)?\]?:?$', re.I)
 JUNK = re.compile(r'^(?:(?:prod\.?|produced|music|lyrics|written|mixed|mastered|beat|cover\s+art)\s+by\b|(?:prod\.?|credits|сведение|мастеринг|музыка|автор|обложка|соцсети|контакты|follow|subscribe)\s*[:：]|(?:follow\s+(?:(?:me|us)\s+on|on|@)|subscribe\s+(?:to|on|@)|listen\s+on|stream\s+(?:on|now)|подписывай\w*|слушай\s+на)\b)', re.I)
+
+
+def soundcloud_artist(info):
+    artist = info.get('artist')
+    if isinstance(artist, str) and artist.strip():
+        return artist.strip()
+    artists = info.get('artists')
+    if isinstance(artists, (list, tuple)):
+        names = ', '.join(name.strip() for name in artists if isinstance(name, str) and name.strip())
+        if names:
+            return names
+    for key in ('uploader', 'channel'):
+        name = info.get(key)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return ''
+
+
+def soundcloud_profile_handle(url):
+    try:
+        parsed = urlparse(url or '')
+    except ValueError:
+        return ''
+    if parsed.hostname not in ('soundcloud.com', 'm.soundcloud.com', 'www.soundcloud.com'):
+        return ''
+    parts = parsed.path.strip('/').split('/')
+    if len(parts) == 3 and parts[-1].startswith('s-'):
+        parts.pop()
+    if len(parts) != 2 or not all(parts) or parts[1] in ('sets', 'likes', 'reposts', 'tracks', 'albums'):
+        return ''
+    handle = unquote(parts[0])
+    return '@' + handle if re.fullmatch(r'[\w.-]+', handle) else ''
 
 
 def description_lyrics(description):
